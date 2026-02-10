@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: x402-base-pulse
-  version: v1.0.0
+  version: v2.0.0
   description: "x402 Base Pulse - Real-time payment protocol analytics for Coinbase x402 on Base"
   url: "https://github.com/PaulieB14/x402-base-pulse"
   image: "./x402-icon.jpg"
@@ -38,26 +38,13 @@ modules:
   - name: map_x402_settlements
     kind: map
     doc: |
-      Extracts x402 settlement events from the x402ExactPermit2Proxy contract.
-      Correlates proxy events with USDC transfers in the same transaction to
-      capture payer, recipient, amount, and facilitator for every x402 payment.
-    # NOTE: Update this to the x402 proxy deployment block on Base once known.
-    # The proxy (0x4020615294c913F045dc10f0a5cdEbd86c280001) was deployed ~Feb 2025.
-    initialBlock: 25000000
-    blockFilter:
-      module: ethcommon:index_events
-      query:
-        string: "evt_addr:0x4020615294c913f045dc10f0a5cdEbd86c280001"
-    inputs:
-      - source: sf.ethereum.type.v2.Block
-    output:
-      type: proto:x402.v1.Settlements
-
-  - name: map_payment_transfers
-    kind: map
-    doc: |
-      Extracts USDC Transfer events that occur in transactions involving the
-      x402 proxy. These represent the actual token movements for x402 payments.
+      Extracts x402 payment settlements on Base by detecting EIP-3009
+      AuthorizationUsed events on the USDC contract. Per the x402 protocol
+      (https://docs.cdp.coinbase.com/x402), facilitators settle payments
+      by calling transferWithAuthorization on USDC. Each AuthorizationUsed
+      event is paired with its Transfer event to capture payer, recipient,
+      and amount. Also detects Permit2 proxy settlements (Settled /
+      SettledWithPermit) for the newer settlement path.
     initialBlock: 25000000
     blockFilter:
       module: ethcommon:index_events
@@ -66,7 +53,7 @@ modules:
     inputs:
       - source: sf.ethereum.type.v2.Block
     output:
-      type: proto:x402.v1.PaymentTransfers
+      type: proto:x402.v1.Settlements
 
   # =============================================
   # LAYER 2: State Stores
@@ -192,7 +179,7 @@ modules:
     kind: map
     doc: |
       Outputs database changes for PostgreSQL sink.
-      Tables: settlements, payers, recipients, facilitators, daily_stats
+      Tables: settlements, payers, recipients, facilitators
     initialBlock: 25000000
     inputs:
       - params: string

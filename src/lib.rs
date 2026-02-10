@@ -1,13 +1,20 @@
-//! x402 Base Pulse - Substreams v1.0.0
+//! x402 Base Pulse - Substreams v2.0.0
 //!
 //! Real-time analytics for the Coinbase x402 payment protocol on Base.
 //!
-//! Tracks every x402 settlement through the x402ExactPermit2Proxy contract,
-//! correlates with USDC transfers, and computes payer, recipient, and
-//! facilitator statistics.
+//! Detects x402 settlements through two mechanisms per the x402 protocol
+//! docs (https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works):
+//!
+//! 1. **EIP-3009 (primary)**: Facilitators settle payments by calling
+//!    `transferWithAuthorization` on USDC (EIP-3009 compliant). Each call
+//!    emits `AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)`
+//!    paired with a `Transfer(address,address,uint256)` event.
+//!
+//! 2. **Permit2 proxy (secondary)**: `Settled()` / `SettledWithPermit()` events
+//!    from the x402ExactPermit2Proxy contract (currently testnet only).
 //!
 //! Module layers:
-//! - Layer 1: Event extraction (map_x402_settlements, map_payment_transfers)
+//! - Layer 1: Event extraction (map_x402_settlements)
 //! - Layer 2: State stores (payer/recipient/facilitator volume, counts, gas)
 //! - Layer 3: Analytics (map_payer_stats, map_recipient_stats, map_facilitator_stats)
 //! - Layer 4: SQL sink (db_out)
@@ -15,7 +22,10 @@
 mod abi;
 mod pb;
 
-use abi::{decode_erc20_transfer, decode_proxy_event, format_address};
+use abi::{
+    decode_authorization_used, decode_erc20_transfer, format_address,
+    is_settled_event, is_settled_with_permit_event,
+};
 use hex_literal::hex;
 use pb::x402::v1 as x402;
 use substreams::prelude::*;
@@ -28,17 +38,18 @@ use substreams_ethereum::pb::eth::v2 as eth;
 
 // =============================================
 // Contract addresses on Base mainnet
+// Per: https://docs.cdp.coinbase.com/x402/network-support
 // =============================================
 
-/// x402ExactPermit2Proxy - deterministic across all EVM chains via CREATE2
-const X402_PROXY: [u8; 20] = hex!("4020615294c913F045dc10f0a5cdEbd86c280001");
-
-/// USDC on Base mainnet
+/// USDC on Base mainnet - EIP-3009 compliant token
 const USDC: [u8; 20] = hex!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 
-/// ERC-20 Transfer event signature
-const TRANSFER_SIG: [u8; 32] =
-    hex!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
+/// x402ExactPermit2Proxy - deterministic across all EVM chains via CREATE2
+/// Secondary detection path (currently active on testnet only)
+const X402_PROXY: [u8; 20] = hex!("4020615294c913F045dc10f0a5cdEbd86c280001");
+
+/// x402UptoPermit2Proxy - secondary proxy for "upto" payment scheme
+const X402_UPTO_PROXY: [u8; 20] = hex!("4020633461b2895a48930Ff97eE8fCdE8E520002");
 
 // Null / zero address
 const ZERO_ADDR: &str = "0x0000000000000000000000000000000000000000";
@@ -103,9 +114,17 @@ fn proto_bigint_to_string(bi: &eth::BigInt) -> String {
 // LAYER 1: Event Extraction
 // =============================================
 
-/// Extract x402 settlements by finding all transactions that emit events
-/// from the x402ExactPermit2Proxy contract, then correlating with USDC
-/// Transfer events in the same transaction.
+/// Extract x402 settlements by detecting EIP-3009 AuthorizationUsed events
+/// on the USDC contract.
+///
+/// Per the x402 protocol (https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works),
+/// facilitators settle payments by calling `transferWithAuthorization` on USDC.
+/// Each `AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)`
+/// event is paired with its corresponding `Transfer(address,address,uint256)`
+/// event to capture payer, recipient, and amount.
+///
+/// Also detects Permit2 proxy settlements (Settled / SettledWithPermit) from
+/// the x402ExactPermit2Proxy contract for the newer settlement path.
 #[substreams::handlers::map]
 fn map_x402_settlements(blk: eth::Block) -> Result<x402::Settlements, substreams::errors::Error> {
     let mut settlements = x402::Settlements {
@@ -120,12 +139,118 @@ fn map_x402_settlements(blk: eth::Block) -> Result<x402::Settlements, substreams
             None => continue,
         };
 
-        // Check if this transaction has any logs from the x402 proxy
-        let has_proxy_event = receipt.logs.iter().any(|log| log.address == X402_PROXY);
+        // -----------------------------------------------
+        // Path 1: EIP-3009 AuthorizationUsed on USDC
+        // Facilitator calls transferWithAuthorization on USDC.
+        // USDC emits AuthorizationUsed + Transfer events.
+        // -----------------------------------------------
+        let auth_events: Vec<_> = receipt
+            .logs
+            .iter()
+            .filter(|log| log.address == USDC)
+            .filter_map(|log| decode_authorization_used(log))
+            .collect();
 
-        if !has_proxy_event {
+        if !auth_events.is_empty() {
+            // Collect Transfer events from USDC in this transaction
+            let transfer_events: Vec<_> = receipt
+                .logs
+                .iter()
+                .filter(|log| log.address == USDC)
+                .filter_map(|log| decode_erc20_transfer(log))
+                .collect();
+
+            let facilitator = format_address(&trx.from);
+            let gas_used = trx.gas_used.to_string();
+            let gas_price = trx
+                .gas_price
+                .as_ref()
+                .map(|p| proto_bigint_to_string(p))
+                .unwrap_or_else(|| "0".to_string());
+
+            // Check if this tx also has proxy events (hybrid detection)
+            let has_proxy_settled = receipt.logs.iter().any(|log| {
+                (log.address == X402_PROXY || log.address == X402_UPTO_PROXY)
+                    && (is_settled_event(log) || is_settled_with_permit_event(log))
+            });
+
+            for auth in &auth_events {
+                // Find the corresponding Transfer event for this authorization.
+                // In USDC's implementation, transferWithAuthorization emits
+                // AuthorizationUsed then Transfer, so we look for a Transfer
+                // where from == authorizer with log_index > auth.log_index.
+                let transfer = transfer_events
+                    .iter()
+                    .filter(|t| t.from == auth.authorizer && t.log_index > auth.log_index)
+                    .min_by_key(|t| t.log_index);
+
+                let (payer, recipient, amount) = if let Some(t) = transfer {
+                    (
+                        format_address(&auth.authorizer),
+                        format_address(&t.to),
+                        t.amount.clone(),
+                    )
+                } else {
+                    // AuthorizationUsed without a matching Transfer (shouldn't happen
+                    // in normal USDC operation, but handle gracefully)
+                    (format_address(&auth.authorizer), String::new(), "0".to_string())
+                };
+
+                let settlement_type = if has_proxy_settled {
+                    "eip3009_proxy".to_string()
+                } else {
+                    "eip3009".to_string()
+                };
+
+                let nonce = Hex(&auth.nonce).to_string();
+
+                settlements.settlements.push(x402::Settlement {
+                    id: format!("{}-{}", Hex(&trx.hash).to_string(), auth.log_index),
+                    tx_hash: Hex(&trx.hash).to_string(),
+                    log_index: auth.log_index,
+                    block_number: blk.number,
+                    timestamp: Some(blk.timestamp().clone()),
+                    payer,
+                    recipient,
+                    token: format_address(&USDC),
+                    amount,
+                    settlement_type,
+                    facilitator: facilitator.clone(),
+                    gas_used: gas_used.clone(),
+                    gas_price: gas_price.clone(),
+                    nonce,
+                });
+            }
+
+            continue; // EIP-3009 path handled this tx
+        }
+
+        // -----------------------------------------------
+        // Path 2: Permit2 proxy (Settled / SettledWithPermit)
+        // When x402ExactPermit2Proxy deploys on mainnet, it emits
+        // parameterless Settled() or SettledWithPermit() events.
+        // We correlate with USDC Transfer events in the same tx.
+        // -----------------------------------------------
+        let proxy_events: Vec<_> = receipt
+            .logs
+            .iter()
+            .filter(|log| {
+                (log.address == X402_PROXY || log.address == X402_UPTO_PROXY)
+                    && (is_settled_event(log) || is_settled_with_permit_event(log))
+            })
+            .collect();
+
+        if proxy_events.is_empty() {
             continue;
         }
+
+        // Collect USDC transfers for correlation
+        let usdc_transfers: Vec<_> = receipt
+            .logs
+            .iter()
+            .filter(|log| log.address == USDC)
+            .filter_map(|log| decode_erc20_transfer(log))
+            .collect();
 
         let facilitator = format_address(&trx.from);
         let gas_used = trx.gas_used.to_string();
@@ -135,164 +260,44 @@ fn map_x402_settlements(blk: eth::Block) -> Result<x402::Settlements, substreams
             .map(|p| proto_bigint_to_string(p))
             .unwrap_or_else(|| "0".to_string());
 
-        // Collect USDC Transfer events from this transaction
-        let usdc_transfers: Vec<_> = receipt
-            .logs
-            .iter()
-            .filter(|log| {
-                log.address == USDC
-                    && log.topics.len() >= 3
-                    && log.topics[0] == TRANSFER_SIG
-            })
-            .filter_map(|log| decode_erc20_transfer(log).map(|t| (log.index, t)))
-            .collect();
-
-        // Process each proxy event
-        for log in &receipt.logs {
-            if log.address != X402_PROXY {
-                continue;
-            }
-
-            let proxy_event = decode_proxy_event(log);
-
-            // Try to get payment details from the proxy event first,
-            // then fall back to USDC transfer correlation
-            let (payer, recipient, token, amount, settlement_type) =
-                if let Some(ref evt) = proxy_event {
-                    let payer = evt
-                        .payer
-                        .as_ref()
-                        .map(|b| format_address(b))
-                        .unwrap_or_default();
-                    let recipient = evt
-                        .recipient
-                        .as_ref()
-                        .map(|b| format_address(b))
-                        .unwrap_or_default();
-                    let token = evt
-                        .token
-                        .as_ref()
-                        .map(|b| format_address(b))
-                        .unwrap_or_default();
-                    let amount = evt.amount.clone().unwrap_or_default();
-                    let st = evt.settlement_type.clone();
-                    (payer, recipient, token, amount, st)
-                } else {
-                    (
-                        String::new(),
-                        String::new(),
-                        String::new(),
-                        String::new(),
-                        "unknown".to_string(),
-                    )
-                };
-
-            // If proxy decode didn't yield payment details, use the USDC transfer
-            let (final_payer, final_recipient, final_token, final_amount) = if !payer.is_empty()
-                && payer != ZERO_ADDR
-                && !amount.is_empty()
-                && amount != "0"
-            {
-                (payer, recipient, token, amount)
-            } else if let Some((_, ref transfer)) = usdc_transfers.first() {
-                (
-                    format_address(&transfer.from),
-                    format_address(&transfer.to),
-                    format_address(&USDC),
-                    transfer.amount.clone(),
-                )
+        for proxy_log in &proxy_events {
+            let settlement_type = if is_settled_with_permit_event(proxy_log) {
+                "settled_with_permit".to_string()
             } else {
-                (
-                    facilitator.clone(),
-                    String::new(),
-                    format_address(&USDC),
-                    "0".to_string(),
-                )
+                "settled".to_string()
             };
 
-            let settlement = x402::Settlement {
-                id: format!("{}-{}", Hex(&trx.hash).to_string(), log.index),
+            // Get payment details from the closest USDC Transfer
+            let (payer, recipient, amount) = if let Some(t) = usdc_transfers.first() {
+                (
+                    format_address(&t.from),
+                    format_address(&t.to),
+                    t.amount.clone(),
+                )
+            } else {
+                (facilitator.clone(), String::new(), "0".to_string())
+            };
+
+            settlements.settlements.push(x402::Settlement {
+                id: format!("{}-{}", Hex(&trx.hash).to_string(), proxy_log.index),
                 tx_hash: Hex(&trx.hash).to_string(),
-                log_index: log.index,
+                log_index: proxy_log.index,
                 block_number: blk.number,
                 timestamp: Some(blk.timestamp().clone()),
-                payer: final_payer,
-                recipient: final_recipient,
-                token: final_token,
-                amount: final_amount,
+                payer,
+                recipient,
+                token: format_address(&USDC),
+                amount,
                 settlement_type,
                 facilitator: facilitator.clone(),
                 gas_used: gas_used.clone(),
                 gas_price: gas_price.clone(),
-                proxy_event_sig: proxy_event
-                    .as_ref()
-                    .map(|e| e.event_sig.clone())
-                    .unwrap_or_default(),
-                proxy_event_data: proxy_event
-                    .as_ref()
-                    .map(|e| e.raw_data.clone())
-                    .unwrap_or_default(),
-            };
-
-            settlements.settlements.push(settlement);
+                nonce: String::new(),
+            });
         }
     }
 
     Ok(settlements)
-}
-
-/// Extract USDC Transfer events that occur in transactions involving the
-/// x402 proxy. This gives us the raw payment flow data.
-#[substreams::handlers::map]
-fn map_payment_transfers(
-    blk: eth::Block,
-) -> Result<x402::PaymentTransfers, substreams::errors::Error> {
-    let mut transfers = x402::PaymentTransfers {
-        block_number: blk.number,
-        ..Default::default()
-    };
-
-    for trx in blk.transaction_traces.iter() {
-        let receipt = match trx.receipt.as_ref() {
-            Some(r) => r,
-            None => continue,
-        };
-
-        let has_proxy = receipt.logs.iter().any(|log| log.address == X402_PROXY);
-
-        for log in &receipt.logs {
-            if log.address != USDC {
-                continue;
-            }
-            if log.topics.len() < 3 || log.topics[0] != TRANSFER_SIG {
-                continue;
-            }
-
-            if let Some(decoded) = decode_erc20_transfer(log) {
-                let from = format_address(&decoded.from);
-                let to = format_address(&decoded.to);
-
-                if from == ZERO_ADDR && to == ZERO_ADDR {
-                    continue;
-                }
-
-                transfers.transfers.push(x402::PaymentTransfer {
-                    tx_hash: Hex(&trx.hash).to_string(),
-                    log_index: log.index,
-                    block_number: blk.number,
-                    timestamp: Some(blk.timestamp().clone()),
-                    from_address: from,
-                    to_address: to,
-                    amount: decoded.amount,
-                    token: format_address(&USDC),
-                    facilitator: format_address(&trx.from),
-                    is_x402_related: has_proxy,
-                });
-            }
-        }
-    }
-
-    Ok(transfers)
 }
 
 // =============================================
@@ -525,11 +530,10 @@ fn db_out(
             .set("facilitator", &s.facilitator)
             .set("gas_used", &s.gas_used)
             .set("gas_price", &s.gas_price)
-            .set("proxy_event_sig", &s.proxy_event_sig)
-            .set("proxy_event_data", &s.proxy_event_data);
+            .set("nonce", &s.nonce);
     }
 
-    // Upsert payer stats (create_row - SQL sink handles ON CONFLICT)
+    // Upsert payer stats
     for stat in payer_stats.stats {
         tables
             .create_row("payers", &stat.payer_address)

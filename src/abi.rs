@@ -1,45 +1,81 @@
 //! ABI decoders for x402 protocol events on Base
 //!
-//! Handles decoding of:
-//! - x402ExactPermit2Proxy events (Settled, SettledWithPermit)
-//! - ERC-20 Transfer events (USDC payment correlation)
-//! - EIP-3009 AuthorizationUsed events
+//! Detects x402 settlements through two EVM event patterns:
+//!
+//! 1. **EIP-3009 (primary)**: `AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)`
+//!    emitted by USDC when `transferWithAuthorization` is called. Per the x402 protocol docs
+//!    (https://docs.cdp.coinbase.com/x402), facilitators settle payments this way.
+//!
+//! 2. **Permit2 proxy (secondary)**: `Settled()` and `SettledWithPermit()` events from the
+//!    x402ExactPermit2Proxy contract (parameterless events, currently testnet only).
+//!
+//! Also decodes ERC-20 `Transfer` events to extract payment amounts.
 
 use substreams::Hex;
 use substreams_ethereum::pb::eth::v2::Log;
+
+// =============================================
+// Event topic hashes (keccak256)
+// Computed via: cast keccak "EventSignature(params)"
+// =============================================
+
+/// Transfer(address indexed from, address indexed to, uint256 value)
+pub const TRANSFER_TOPIC: [u8; 32] = [
+    0xdd, 0xf2, 0x52, 0xad, 0x1b, 0xe2, 0xc8, 0x9b,
+    0x69, 0xc2, 0xb0, 0x68, 0xfc, 0x37, 0x8d, 0xaa,
+    0x95, 0x2b, 0xa7, 0xf1, 0x63, 0xc4, 0xa1, 0x16,
+    0x28, 0xf5, 0x5a, 0x4d, 0xf5, 0x23, 0xb3, 0xef,
+];
+
+/// AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)
+/// keccak256("AuthorizationUsed(address,bytes32)")
+pub const AUTHORIZATION_USED_TOPIC: [u8; 32] = [
+    0x98, 0xde, 0x50, 0x35, 0x28, 0xee, 0x59, 0xb5,
+    0x75, 0xef, 0x0c, 0x0a, 0x25, 0x76, 0xa8, 0x24,
+    0x97, 0xbf, 0xc0, 0x29, 0xa5, 0x68, 0x5b, 0x20,
+    0x9e, 0x9e, 0xc3, 0x33, 0x47, 0x9b, 0x10, 0xa5,
+];
+
+/// Settled() - x402 proxy event (no parameters)
+/// keccak256("Settled()")
+pub const SETTLED_TOPIC: [u8; 32] = [
+    0x97, 0x08, 0x8e, 0xc3, 0x60, 0x6c, 0xfe, 0x8c,
+    0xc1, 0x12, 0x18, 0x05, 0x70, 0xd0, 0x3f, 0xcd,
+    0xe0, 0x5f, 0x9b, 0x8e, 0x1b, 0xfe, 0xf8, 0xe2,
+    0x77, 0x84, 0xea, 0xf5, 0xdd, 0x56, 0x91, 0xb6,
+];
+
+/// SettledWithPermit() - x402 proxy event (no parameters)
+/// keccak256("SettledWithPermit()")
+pub const SETTLED_WITH_PERMIT_TOPIC: [u8; 32] = [
+    0xde, 0x5b, 0x89, 0xd1, 0x0f, 0xc8, 0x00, 0xc4,
+    0x59, 0x32, 0x9c, 0x38, 0x2f, 0xab, 0xfc, 0xad,
+    0x0b, 0xe0, 0xed, 0x7e, 0x53, 0x28, 0xe0, 0x1f,
+    0xae, 0x04, 0xe5, 0x07, 0xb0, 0x9e, 0xf5, 0xd8,
+];
+
+// =============================================
+// Decoded event structs
+// =============================================
 
 /// Decoded ERC-20 Transfer event
 pub struct TransferEvent {
     pub from: Vec<u8>,
     pub to: Vec<u8>,
     pub amount: String,
+    pub log_index: u32,
 }
 
-/// Decoded x402 proxy settlement event
-pub struct ProxySettlementEvent {
-    /// "settled" or "settled_with_permit"
-    pub settlement_type: String,
-    /// First topic hash (event signature)
-    pub event_sig: String,
-    /// Raw hex-encoded event data for future decoding
-    pub raw_data: String,
-    /// Decoded payer if extractable from event data
-    pub payer: Option<Vec<u8>>,
-    /// Decoded recipient if extractable from event data
-    pub recipient: Option<Vec<u8>>,
-    /// Decoded token address if extractable from event data
-    pub token: Option<Vec<u8>>,
-    /// Decoded amount if extractable from event data
-    pub amount: Option<String>,
+/// Decoded EIP-3009 AuthorizationUsed event
+pub struct AuthorizationUsedEvent {
+    pub authorizer: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub log_index: u32,
 }
 
-// ERC-20 Transfer(address indexed from, address indexed to, uint256 value)
-const TRANSFER_SIG: [u8; 32] = [
-    0xdd, 0xf2, 0x52, 0xad, 0x1b, 0xe2, 0xc8, 0x9b,
-    0x69, 0xc2, 0xb0, 0x68, 0xfc, 0x37, 0x8d, 0xaa,
-    0x95, 0x2b, 0xa7, 0xf1, 0x63, 0xc4, 0xa1, 0x16,
-    0x28, 0xf5, 0x5a, 0x4d, 0xf5, 0x23, 0xb3, 0xef,
-];
+// =============================================
+// Decoders
+// =============================================
 
 /// Decode ERC-20 Transfer event
 /// Event: Transfer(address indexed from, address indexed to, uint256 value)
@@ -47,8 +83,7 @@ pub fn decode_erc20_transfer(log: &Log) -> Option<TransferEvent> {
     if log.topics.len() < 3 || log.data.len() < 32 {
         return None;
     }
-
-    if log.topics[0] != TRANSFER_SIG {
+    if log.topics[0] != TRANSFER_TOPIC {
         return None;
     }
 
@@ -56,76 +91,45 @@ pub fn decode_erc20_transfer(log: &Log) -> Option<TransferEvent> {
     let to = log.topics[2][12..32].to_vec();
     let amount = parse_uint256(&log.data[0..32]);
 
-    Some(TransferEvent { from, to, amount })
+    Some(TransferEvent {
+        from,
+        to,
+        amount,
+        log_index: log.index,
+    })
 }
 
-/// Attempt to decode a settlement event from the x402 proxy contract.
+/// Decode EIP-3009 AuthorizationUsed event
+/// Event: AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)
 ///
-/// Since the exact event ABI is not published in the x402 repo, we use a
-/// heuristic approach: capture the event signature and raw data, then
-/// attempt to decode common patterns.
-///
-/// Known event names: Settled, SettledWithPermit
-pub fn decode_proxy_event(log: &Log) -> Option<ProxySettlementEvent> {
-    if log.topics.is_empty() {
+/// Emitted by USDC when transferWithAuthorization is called.
+/// The authorizer is the payer who signed the EIP-3009 authorization.
+pub fn decode_authorization_used(log: &Log) -> Option<AuthorizationUsedEvent> {
+    if log.topics.len() < 3 {
+        return None;
+    }
+    if log.topics[0] != AUTHORIZATION_USED_TOPIC {
         return None;
     }
 
-    let event_sig = Hex(&log.topics[0]).to_string();
-    let raw_data = Hex(&log.data).to_string();
+    let authorizer = log.topics[1][12..32].to_vec();
+    let nonce = log.topics[2].clone();
 
-    // Attempt to decode based on common proxy event patterns.
-    // The proxy likely emits events with indexed token, payer, and recipient addresses.
-    //
-    // Expected pattern (3 indexed + data):
-    //   topic[0] = event signature
-    //   topic[1] = token address (indexed)
-    //   topic[2] = payer address (indexed)
-    //   topic[3] = recipient address (indexed)
-    //   data     = amount (uint256) + possibly more fields
-    //
-    // Alternative pattern (some indexed):
-    //   topic[0] = event signature
-    //   topic[1] = payer (indexed)
-    //   topic[2] = recipient (indexed)
-    //   data     = token + amount + ...
-
-    let (payer, recipient, token, amount) = if log.topics.len() >= 4 && log.data.len() >= 32 {
-        // Pattern: 3 indexed addresses + amount in data
-        let token = Some(log.topics[1][12..32].to_vec());
-        let payer = Some(log.topics[2][12..32].to_vec());
-        let recipient = Some(log.topics[3][12..32].to_vec());
-        let amount = Some(parse_uint256(&log.data[0..32]));
-        (payer, recipient, token, amount)
-    } else if log.topics.len() >= 3 && log.data.len() >= 64 {
-        // Pattern: 2 indexed addresses + token and amount in data
-        let payer = Some(log.topics[1][12..32].to_vec());
-        let recipient = Some(log.topics[2][12..32].to_vec());
-        let token = Some(log.data[12..32].to_vec());
-        let amount = Some(parse_uint256(&log.data[32..64]));
-        (payer, recipient, token, amount)
-    } else {
-        (None, None, None, None)
-    };
-
-    // Classify settlement type based on event sig uniqueness
-    // We identify "settled_with_permit" if the event has more data fields
-    // (permit-based settlements include additional permit parameters)
-    let settlement_type = if log.data.len() > 128 {
-        "settled_with_permit".to_string()
-    } else {
-        "settled".to_string()
-    };
-
-    Some(ProxySettlementEvent {
-        settlement_type,
-        event_sig,
-        raw_data,
-        payer,
-        recipient,
-        token,
-        amount,
+    Some(AuthorizationUsedEvent {
+        authorizer,
+        nonce,
+        log_index: log.index,
     })
+}
+
+/// Check if a log is a Settled() event from the x402 proxy
+pub fn is_settled_event(log: &Log) -> bool {
+    !log.topics.is_empty() && log.topics[0] == SETTLED_TOPIC
+}
+
+/// Check if a log is a SettledWithPermit() event from the x402 proxy
+pub fn is_settled_with_permit_event(log: &Log) -> bool {
+    !log.topics.is_empty() && log.topics[0] == SETTLED_WITH_PERMIT_TOPIC
 }
 
 /// Parse uint256 from 32-byte big-endian slice

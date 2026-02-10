@@ -1,7 +1,10 @@
 -- x402 Base Pulse - PostgreSQL Schema
--- Version: 1.0.0
+-- Version: 2.0.0
 --
--- Run with: substreams-sink-sql setup "postgres://..." x402-base-pulse-v1.0.0.spkg
+-- Detects x402 settlements via EIP-3009 AuthorizationUsed events on USDC.
+-- Per: https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works
+--
+-- Run with: substreams-sink-sql setup "postgres://..." x402-base-pulse-v2.0.0.spkg
 
 -------------------------------------------------
 -- SETTLEMENTS: Every x402 payment on Base
@@ -14,22 +17,25 @@ CREATE TABLE IF NOT EXISTS settlements (
     log_index INTEGER NOT NULL,
 
     -- Payment details
-    payer VARCHAR(42) NOT NULL,               -- Who paid
+    payer VARCHAR(42) NOT NULL,               -- Who paid (EIP-3009 authorizer)
     recipient VARCHAR(42) NOT NULL,           -- Resource server (payTo)
-    token VARCHAR(42) NOT NULL,               -- Token address (USDC etc)
+    token VARCHAR(42) NOT NULL,               -- Token address (USDC)
     amount NUMERIC(38, 6) NOT NULL DEFAULT 0, -- Payment amount (atomic units)
 
     -- Settlement classification
-    settlement_type VARCHAR(32) NOT NULL,     -- 'settled', 'settled_with_permit', 'eip3009'
+    -- eip3009: facilitator called transferWithAuthorization on USDC
+    -- eip3009_proxy: EIP-3009 + proxy Settled event in same tx
+    -- settled: proxy Settled() event
+    -- settled_with_permit: proxy SettledWithPermit() event
+    settlement_type VARCHAR(32) NOT NULL,
 
     -- Facilitator info
-    facilitator VARCHAR(42) NOT NULL,         -- Who submitted tx and paid gas
+    facilitator VARCHAR(42) NOT NULL,         -- tx.from - who submitted and paid gas
     gas_used NUMERIC(20, 0) NOT NULL DEFAULT 0,
     gas_price NUMERIC(30, 0) NOT NULL DEFAULT 0,
 
-    -- Raw event data (for future decoding as ABI becomes known)
-    proxy_event_sig VARCHAR(66),
-    proxy_event_data TEXT,
+    -- EIP-3009 authorization nonce (hex-encoded bytes32)
+    nonce VARCHAR(66),
 
     created_at TIMESTAMP DEFAULT NOW()
 );
@@ -201,7 +207,8 @@ SELECT
     amount,
     settlement_type,
     facilitator,
-    gas_used
+    gas_used,
+    nonce
 FROM settlements
 ORDER BY block_number DESC, log_index DESC
 LIMIT 100;

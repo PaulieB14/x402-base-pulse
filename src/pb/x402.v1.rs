@@ -16,6 +16,14 @@ pub struct Settlements {
     pub block_timestamp: ::core::option::Option<::prost_types::Timestamp>,
 }
 /// A single x402 payment settlement
+///
+/// Detected via two mechanisms per the x402 protocol
+/// (<https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works>):
+///
+/// 1. EIP-3009: AuthorizationUsed events on USDC from facilitator
+///    calling transferWithAuthorization. The nonce field is populated.
+/// 2. Permit2 proxy: Settled/SettledWithPermit events from the
+///    x402ExactPermit2Proxy contract (when deployed on mainnet).
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Settlement {
@@ -32,26 +40,26 @@ pub struct Settlement {
     pub timestamp: ::core::option::Option<::prost_types::Timestamp>,
     /// Payment details
     ///
-    /// Who paid (token sender)
+    /// Who paid (authorizer / token sender)
     #[prost(string, tag="6")]
     pub payer: ::prost::alloc::string::String,
     /// Resource server (payTo)
     #[prost(string, tag="7")]
     pub recipient: ::prost::alloc::string::String,
-    /// Token address (e.g. USDC)
+    /// Token address (USDC)
     #[prost(string, tag="8")]
     pub token: ::prost::alloc::string::String,
-    /// Payment amount (atomic units)
+    /// Payment amount (atomic units, 6 decimals for USDC)
     #[prost(string, tag="9")]
     pub amount: ::prost::alloc::string::String,
     /// Settlement classification
     ///
-    /// "settled", "settled_with_permit", "eip3009"
+    /// "eip3009", "eip3009_proxy", "settled", "settled_with_permit"
     #[prost(string, tag="10")]
     pub settlement_type: ::prost::alloc::string::String,
     /// Facilitator info (who submitted tx and paid gas)
     ///
-    /// msg.sender / tx.from
+    /// tx.from - the facilitator that settled on-chain
     #[prost(string, tag="11")]
     pub facilitator: ::prost::alloc::string::String,
     /// Gas consumed by the transaction
@@ -60,51 +68,10 @@ pub struct Settlement {
     /// Effective gas price (wei)
     #[prost(string, tag="13")]
     pub gas_price: ::prost::alloc::string::String,
-    /// Raw proxy event data (for future decoding)
-    ///
-    /// Topic\[0\] of the proxy event
+    /// EIP-3009 authorization nonce (from AuthorizationUsed event)
+    /// bytes32 nonce, hex-encoded
     #[prost(string, tag="14")]
-    pub proxy_event_sig: ::prost::alloc::string::String,
-    /// Hex-encoded event data
-    #[prost(string, tag="15")]
-    pub proxy_event_data: ::prost::alloc::string::String,
-}
-/// USDC transfer events correlated with x402 settlements
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PaymentTransfers {
-    #[prost(message, repeated, tag="1")]
-    pub transfers: ::prost::alloc::vec::Vec<PaymentTransfer>,
-    #[prost(uint64, tag="2")]
-    pub block_number: u64,
-}
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PaymentTransfer {
-    #[prost(string, tag="1")]
-    pub tx_hash: ::prost::alloc::string::String,
-    #[prost(uint32, tag="2")]
-    pub log_index: u32,
-    #[prost(uint64, tag="3")]
-    pub block_number: u64,
-    #[prost(message, optional, tag="4")]
-    pub timestamp: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(string, tag="5")]
-    pub from_address: ::prost::alloc::string::String,
-    #[prost(string, tag="6")]
-    pub to_address: ::prost::alloc::string::String,
-    /// USDC amount (6 decimals)
-    #[prost(string, tag="7")]
-    pub amount: ::prost::alloc::string::String,
-    /// Token contract address
-    #[prost(string, tag="8")]
-    pub token: ::prost::alloc::string::String,
-    /// Transaction sender
-    #[prost(string, tag="9")]
-    pub facilitator: ::prost::alloc::string::String,
-    /// Tx also has x402 proxy events
-    #[prost(bool, tag="10")]
-    pub is_x402_related: bool,
+    pub nonce: ::prost::alloc::string::String,
 }
 // =============================================
 // LAYER 3: Analytics

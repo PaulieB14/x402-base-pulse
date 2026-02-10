@@ -2,18 +2,34 @@
 
 > Real-time payment protocol analytics for [Coinbase x402](https://github.com/coinbase/x402) on Base
 
-**Note:** The x402 proxy contract is currently active on Base Sepolia testnet (194+ settlements since Jan 2026) and has not yet been deployed to Base mainnet. This Substreams is production-ready and will begin indexing automatically once the proxy goes live on mainnet.
-
-Track every x402 payment settlement on Base mainnet. Indexes the **x402ExactPermit2Proxy** contract, correlates USDC transfers, and computes per-actor analytics in real time.
+Track every x402 payment settlement on Base mainnet. Detects EIP-3009 `transferWithAuthorization` calls on USDC -- the primary settlement mechanism used by x402 facilitators -- and computes per-actor analytics in real time.
 
 ---
+
+## How x402 Settlement Works
+
+Per the [x402 protocol docs](https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works):
+
+1. Client requests a paid resource
+2. Server responds with **HTTP 402** + payment requirements
+3. Client signs an EIP-3009 payment authorization
+4. **Facilitator settles on-chain** by calling `transferWithAuthorization` on USDC
+5. Server delivers the resource
+
+This Substreams indexes **step 4** -- every on-chain settlement -- by detecting `AuthorizationUsed` events on the USDC contract, giving full visibility into the x402 payment network on Base.
+
+## Detection Methods
+
+| Method | Mechanism | Status |
+|--------|-----------|--------|
+| **EIP-3009** (primary) | `AuthorizationUsed` events on USDC from `transferWithAuthorization` | Active on mainnet |
+| **Permit2 proxy** (secondary) | `Settled()` / `SettledWithPermit()` from x402ExactPermit2Proxy | Ready for mainnet deployment |
 
 ## Modules
 
 ```
 Layer 1 - Extraction
-  map_x402_settlements .......... Proxy settlement events (Settled / SettledWithPermit)
-  map_payment_transfers ......... USDC Transfer events in x402 transactions
+  map_x402_settlements .......... EIP-3009 AuthorizationUsed + Transfer event pairs
 
 Layer 2 - State Stores
   store_payer_volume ............ Total spend per payer
@@ -33,12 +49,13 @@ Layer 4 - SQL Sink
   db_out ........................ PostgreSQL output (5 tables + 5 views)
 ```
 
-## Contracts Indexed
+## Contracts & Events
 
 | Contract | Address | Events |
 |----------|---------|--------|
+| USDC (Base) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | AuthorizationUsed, Transfer |
 | x402ExactPermit2Proxy | `0x4020615294c913F045dc10f0a5cdEbd86c280001` | Settled, SettledWithPermit |
-| USDC (Base) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | Transfer |
+| x402UptoPermit2Proxy | `0x4020633461b2895a48930Ff97eE8fCdE8E520002` | Settled, SettledWithPermit |
 
 ## Quick Start
 
@@ -55,7 +72,7 @@ substreams gui x402-base-pulse map_x402_settlements \
 
 # Sink to PostgreSQL
 substreams-sink-sql run "psql://localhost/x402" \
-  x402-base-pulse-v1.0.0.spkg \
+  x402-base-pulse-v2.0.0.spkg \
   -e base-mainnet.streamingfast.io:443
 ```
 
@@ -79,18 +96,13 @@ substreams-sink-sql run "psql://localhost/x402" \
 | `whale_payments` | Payments > $100 USDC |
 | `recent_settlements` | Live settlement feed |
 
-## What is x402?
+## References
 
-[x402](https://github.com/coinbase/x402) is Coinbase's open-standard payment protocol using the HTTP 402 status code for internet-native crypto payments. Clients pay for API resources via signed authorizations (EIP-3009 / Permit2), and facilitators handle on-chain settlement and gas sponsorship.
-
-**Payment flow:**
-1. Client requests a paid resource
-2. Server responds with HTTP 402 + payment requirements
-3. Client signs a payment authorization
-4. Facilitator settles on-chain via the x402 proxy
-5. Server delivers the resource
-
-This Substreams indexes step 4 -- every on-chain settlement -- giving you full visibility into the x402 payment network on Base.
+- [x402 Protocol Docs](https://docs.cdp.coinbase.com/x402)
+- [x402 Network Support](https://docs.cdp.coinbase.com/x402/network-support) -- supported tokens & chains
+- [x402 How It Works](https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works) -- settlement flow
+- [EIP-3009](https://eips.ethereum.org/EIPS/eip-3009) -- Transfer With Authorization standard
+- [x402 Source Code](https://github.com/coinbase/x402) -- protocol implementation
 
 ## Build from Source
 

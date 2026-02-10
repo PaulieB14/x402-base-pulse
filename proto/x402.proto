@@ -16,6 +16,14 @@ message Settlements {
 }
 
 // A single x402 payment settlement
+//
+// Detected via two mechanisms per the x402 protocol
+// (https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works):
+//
+// 1. EIP-3009: AuthorizationUsed events on USDC from facilitator
+//    calling transferWithAuthorization. The nonce field is populated.
+// 2. Permit2 proxy: Settled/SettledWithPermit events from the
+//    x402ExactPermit2Proxy contract (when deployed on mainnet).
 message Settlement {
     string id = 1;                        // tx_hash-log_index
     string tx_hash = 2;
@@ -24,43 +32,21 @@ message Settlement {
     google.protobuf.Timestamp timestamp = 5;
 
     // Payment details
-    string payer = 6;                     // Who paid (token sender)
+    string payer = 6;                     // Who paid (authorizer / token sender)
     string recipient = 7;                 // Resource server (payTo)
-    string token = 8;                     // Token address (e.g. USDC)
-    string amount = 9;                    // Payment amount (atomic units)
+    string token = 8;                     // Token address (USDC)
+    string amount = 9;                    // Payment amount (atomic units, 6 decimals for USDC)
 
     // Settlement classification
-    string settlement_type = 10;          // "settled", "settled_with_permit", "eip3009"
+    string settlement_type = 10;          // "eip3009", "eip3009_proxy", "settled", "settled_with_permit"
 
     // Facilitator info (who submitted tx and paid gas)
-    string facilitator = 11;              // msg.sender / tx.from
+    string facilitator = 11;              // tx.from - the facilitator that settled on-chain
     string gas_used = 12;                 // Gas consumed by the transaction
     string gas_price = 13;               // Effective gas price (wei)
 
-    // Raw proxy event data (for future decoding)
-    string proxy_event_sig = 14;          // Topic[0] of the proxy event
-    string proxy_event_data = 15;         // Hex-encoded event data
-}
-
-// USDC transfer events correlated with x402 settlements
-message PaymentTransfers {
-    repeated PaymentTransfer transfers = 1;
-    uint64 block_number = 2;
-}
-
-message PaymentTransfer {
-    string tx_hash = 1;
-    uint32 log_index = 2;
-    uint64 block_number = 3;
-    google.protobuf.Timestamp timestamp = 4;
-
-    string from_address = 5;
-    string to_address = 6;
-    string amount = 7;                    // USDC amount (6 decimals)
-    string token = 8;                     // Token contract address
-
-    string facilitator = 9;              // Transaction sender
-    bool is_x402_related = 10;           // Tx also has x402 proxy events
+    // EIP-3009 authorization nonce (from AuthorizationUsed event)
+    string nonce = 14;                    // bytes32 nonce, hex-encoded
 }
 
 // =============================================
