@@ -2,6 +2,8 @@
 
 > Real-time payment protocol analytics for [Coinbase x402](https://github.com/coinbase/x402) on Base
 
+**Note:** The x402 proxy contract is currently active on Base Sepolia testnet (194+ settlements since Jan 2026) and has not yet been deployed to Base mainnet. This Substreams is production-ready and will begin indexing automatically once the proxy goes live on mainnet.
+
 Track every x402 payment settlement on Base mainnet. Indexes the **x402ExactPermit2Proxy** contract, correlates USDC transfers, and computes per-actor analytics in real time.
 
 ---
