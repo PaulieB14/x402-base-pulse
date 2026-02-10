@@ -18,13 +18,6 @@ Per the [x402 protocol docs](https://docs.cdp.coinbase.com/x402/core-concepts/ho
 
 This Substreams indexes **step 4** -- every on-chain settlement -- by detecting `AuthorizationUsed` events on the USDC contract, giving full visibility into the x402 payment network on Base.
 
-## Detection Methods
-
-| Method | Mechanism | Status |
-|--------|-----------|--------|
-| **EIP-3009** (primary) | `AuthorizationUsed` events on USDC from `transferWithAuthorization` | Active on mainnet |
-| **Permit2 proxy** (secondary) | `Settled()` / `SettledWithPermit()` from x402ExactPermit2Proxy | Ready for mainnet deployment |
-
 ## Modules
 
 ```
@@ -49,13 +42,11 @@ Layer 4 - SQL Sink
   db_out ........................ PostgreSQL output (5 tables + 5 views)
 ```
 
-## Contracts & Events
+## Contract Indexed
 
 | Contract | Address | Events |
 |----------|---------|--------|
 | USDC (Base) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | AuthorizationUsed, Transfer |
-| x402ExactPermit2Proxy | `0x4020615294c913F045dc10f0a5cdEbd86c280001` | Settled, SettledWithPermit |
-| x402UptoPermit2Proxy | `0x4020633461b2895a48930Ff97eE8fCdE8E520002` | Settled, SettledWithPermit |
 
 ## Quick Start
 
