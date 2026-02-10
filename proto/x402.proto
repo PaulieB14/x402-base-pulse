@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+package x402.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// =============================================
+// LAYER 1: Settlement Extraction
+// =============================================
+
+// All x402 settlements detected in a block
+message Settlements {
+    repeated Settlement settlements = 1;
+    uint64 block_number = 2;
+    google.protobuf.Timestamp block_timestamp = 3;
+}
+
+// A single x402 payment settlement
+message Settlement {
+    string id = 1;                        // tx_hash-log_index
+    string tx_hash = 2;
+    uint32 log_index = 3;
+    uint64 block_number = 4;
+    google.protobuf.Timestamp timestamp = 5;
+
+    // Payment details
+    string payer = 6;                     // Who paid (token sender)
+    string recipient = 7;                 // Resource server (payTo)
+    string token = 8;                     // Token address (e.g. USDC)
+    string amount = 9;                    // Payment amount (atomic units)
+
+    // Settlement classification
+    string settlement_type = 10;          // "settled", "settled_with_permit", "eip3009"
+
+    // Facilitator info (who submitted tx and paid gas)
+    string facilitator = 11;              // msg.sender / tx.from
+    string gas_used = 12;                 // Gas consumed by the transaction
+    string gas_price = 13;               // Effective gas price (wei)
+
+    // Raw proxy event data (for future decoding)
+    string proxy_event_sig = 14;          // Topic[0] of the proxy event
+    string proxy_event_data = 15;         // Hex-encoded event data
+}
+
+// USDC transfer events correlated with x402 settlements
+message PaymentTransfers {
+    repeated PaymentTransfer transfers = 1;
+    uint64 block_number = 2;
+}
+
+message PaymentTransfer {
+    string tx_hash = 1;
+    uint32 log_index = 2;
+    uint64 block_number = 3;
+    google.protobuf.Timestamp timestamp = 4;
+
+    string from_address = 5;
+    string to_address = 6;
+    string amount = 7;                    // USDC amount (6 decimals)
+    string token = 8;                     // Token contract address
+
+    string facilitator = 9;              // Transaction sender
+    bool is_x402_related = 10;           // Tx also has x402 proxy events
+}
+
+// =============================================
+// LAYER 3: Analytics
+// =============================================
+
+// Aggregated payer statistics
+message PayerStats {
+    repeated PayerStat stats = 1;
+    uint64 block_number = 2;
+}
+
+message PayerStat {
+    string payer_address = 1;
+    string total_spent = 2;               // Total USDC spent
+    uint64 total_payments = 3;
+    google.protobuf.Timestamp first_payment_at = 4;
+    google.protobuf.Timestamp last_payment_at = 5;
+}
+
+// Aggregated recipient (resource server) statistics
+message RecipientStats {
+    repeated RecipientStat stats = 1;
+    uint64 block_number = 2;
+}
+
+message RecipientStat {
+    string recipient_address = 1;
+    string total_received = 2;            // Total USDC received
+    uint64 total_payments = 3;
+    google.protobuf.Timestamp first_payment_at = 4;
+    google.protobuf.Timestamp last_payment_at = 5;
+}
+
+// Facilitator gas economics
+message FacilitatorStats {
+    repeated FacilitatorStat stats = 1;
+    uint64 block_number = 2;
+}
+
+message FacilitatorStat {
+    string facilitator_address = 1;
+    uint64 total_settlements = 2;
+    string total_volume_settled = 3;      // Total USDC volume processed
+    string total_gas_spent = 4;           // Total gas cost in wei
+    google.protobuf.Timestamp first_settlement_at = 5;
+    google.protobuf.Timestamp last_settlement_at = 6;
+}

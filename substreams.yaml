@@ -1,0 +1,213 @@
+specVersion: v0.1.0
+package:
+  name: x402-base-pulse
+  version: v1.0.0
+  description: "x402 Base Pulse - Real-time payment protocol analytics for Coinbase x402 on Base"
+  url: "https://github.com/PaulieB14/x402-base-pulse"
+  image: "./x402-icon.jpg"
+
+imports:
+  database_change: https://github.com/streamingfast/substreams-sink-database-changes/releases/download/v2.1.0/substreams-sink-database-changes-v2.1.0.spkg
+  sql: https://github.com/streamingfast/substreams-sink-sql/releases/download/protodefs-v1.0.7/substreams-sink-sql-protodefs-v1.0.7.spkg
+  ethcommon: https://spkg.io/streamingfast/ethereum-common-v0.3.0.spkg
+
+protobuf:
+  files:
+    - x402.proto
+  importPaths:
+    - ./proto
+  excludePaths:
+    - sf/substreams
+    - google
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ./target/wasm32-unknown-unknown/release/substreams.wasm
+
+network: base
+
+params:
+  db_out: "min_amount=0"
+
+modules:
+  # =============================================
+  # LAYER 1: Event Extraction
+  # =============================================
+
+  - name: map_x402_settlements
+    kind: map
+    doc: |
+      Extracts x402 settlement events from the x402ExactPermit2Proxy contract.
+      Correlates proxy events with USDC transfers in the same transaction to
+      capture payer, recipient, amount, and facilitator for every x402 payment.
+    # NOTE: Update this to the x402 proxy deployment block on Base once known.
+    # The proxy (0x4020615294c913F045dc10f0a5cdEbd86c280001) was deployed ~Feb 2025.
+    initialBlock: 25000000
+    blockFilter:
+      module: ethcommon:index_events
+      query:
+        string: "evt_addr:0x4020615294c913f045dc10f0a5cdEbd86c280001"
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:x402.v1.Settlements
+
+  - name: map_payment_transfers
+    kind: map
+    doc: |
+      Extracts USDC Transfer events that occur in transactions involving the
+      x402 proxy. These represent the actual token movements for x402 payments.
+    initialBlock: 25000000
+    blockFilter:
+      module: ethcommon:index_events
+      query:
+        string: "evt_addr:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:x402.v1.PaymentTransfers
+
+  # =============================================
+  # LAYER 2: State Stores
+  # =============================================
+
+  - name: store_payer_volume
+    kind: store
+    doc: "Accumulates total payment volume per payer address. Key: {payer_address}"
+    initialBlock: 25000000
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_x402_settlements
+
+  - name: store_payer_count
+    kind: store
+    doc: "Counts total payments per payer address. Key: {payer_address}"
+    initialBlock: 25000000
+    updatePolicy: add
+    valueType: int64
+    inputs:
+      - map: map_x402_settlements
+
+  - name: store_recipient_volume
+    kind: store
+    doc: "Accumulates total revenue per recipient (resource server). Key: {recipient_address}"
+    initialBlock: 25000000
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_x402_settlements
+
+  - name: store_recipient_count
+    kind: store
+    doc: "Counts total payments per recipient. Key: {recipient_address}"
+    initialBlock: 25000000
+    updatePolicy: add
+    valueType: int64
+    inputs:
+      - map: map_x402_settlements
+
+  - name: store_facilitator_volume
+    kind: store
+    doc: "Accumulates total volume settled per facilitator. Key: {facilitator_address}"
+    initialBlock: 25000000
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_x402_settlements
+
+  - name: store_facilitator_count
+    kind: store
+    doc: "Counts total settlements per facilitator. Key: {facilitator_address}"
+    initialBlock: 25000000
+    updatePolicy: add
+    valueType: int64
+    inputs:
+      - map: map_x402_settlements
+
+  - name: store_facilitator_gas
+    kind: store
+    doc: "Accumulates total gas spent per facilitator. Key: {facilitator_address}"
+    initialBlock: 25000000
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_x402_settlements
+
+  # =============================================
+  # LAYER 3: Computed Analytics
+  # =============================================
+
+  - name: map_payer_stats
+    kind: map
+    doc: |
+      Computes real-time payer statistics by combining settlement data
+      with accumulated store values.
+    initialBlock: 25000000
+    inputs:
+      - map: map_x402_settlements
+      - store: store_payer_volume
+        mode: deltas
+      - store: store_payer_count
+        mode: get
+    output:
+      type: proto:x402.v1.PayerStats
+
+  - name: map_recipient_stats
+    kind: map
+    doc: |
+      Computes real-time recipient (resource server) revenue statistics.
+    initialBlock: 25000000
+    inputs:
+      - map: map_x402_settlements
+      - store: store_recipient_volume
+        mode: deltas
+      - store: store_recipient_count
+        mode: get
+    output:
+      type: proto:x402.v1.RecipientStats
+
+  - name: map_facilitator_stats
+    kind: map
+    doc: |
+      Computes facilitator economics: volume processed, gas spent, settlement count.
+    initialBlock: 25000000
+    inputs:
+      - map: map_x402_settlements
+      - store: store_facilitator_volume
+        mode: deltas
+      - store: store_facilitator_count
+        mode: get
+      - store: store_facilitator_gas
+        mode: get
+    output:
+      type: proto:x402.v1.FacilitatorStats
+
+  # =============================================
+  # LAYER 4: SQL Sink Output
+  # =============================================
+
+  - name: db_out
+    kind: map
+    doc: |
+      Outputs database changes for PostgreSQL sink.
+      Tables: settlements, payers, recipients, facilitators, daily_stats
+    initialBlock: 25000000
+    inputs:
+      - params: string
+      - map: map_x402_settlements
+      - map: map_payer_stats
+      - map: map_recipient_stats
+      - map: map_facilitator_stats
+    output:
+      type: proto:sf.substreams.sink.database.v1.DatabaseChanges
+
+sink:
+  module: db_out
+  type: sf.substreams.sink.sql.v1.Service
+  config:
+    schema: "./schema.sql"
+    engine: postgres
+    postgraphile_frontend:
+      enabled: true
