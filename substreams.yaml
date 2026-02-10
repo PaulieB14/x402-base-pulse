@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: x402-base-pulse
-  version: v2.0.1
+  version: v2.0.2
   description: "x402 Base Pulse - Real-time payment protocol analytics for Coinbase x402 on Base"
   url: "https://github.com/PaulieB14/x402-base-pulse"
   image: "./x402-icon.jpg"

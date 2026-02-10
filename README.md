@@ -16,6 +16,19 @@ The [x402 protocol](https://docs.cdp.coinbase.com/x402/core-concepts/how-it-work
 4. USDC emits `AuthorizationUsed` + `Transfer` events
 5. **This Substreams captures those events** and extracts settlement data
 
+## Sample Data (1,000 blocks from block 29M)
+
+| Metric | Value |
+|--------|-------|
+| Settlements found | 129 |
+| Total volume | $7,268 USDC |
+| Unique payers | 101 |
+| Unique recipients | 88 |
+| Active facilitators | 4 |
+| Batch transactions | 27 |
+| Field completeness | 100% |
+| Payment range | $0.0001 -- $2,655 USDC |
+
 ## Modules
 
 | Module | Kind | Description |
