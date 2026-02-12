@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: x402-base-pulse
-  version: v2.0.2
+  version: v2.1.0
   description: "x402 Base Pulse - Real-time payment protocol analytics for Coinbase x402 on Base"
   url: "https://github.com/PaulieB14/x402-base-pulse"
   image: "./x402-icon.jpg"
@@ -122,6 +122,15 @@ modules:
     inputs:
       - map: map_x402_settlements
 
+  - name: store_first_seen
+    kind: store
+    doc: "Records first-seen block timestamp per entity. Key: payer:{addr}, recipient:{addr}, facilitator:{addr}"
+    initialBlock: 25000000
+    updatePolicy: set_if_not_exists
+    valueType: int64
+    inputs:
+      - map: map_x402_settlements
+
   # =============================================
   # LAYER 3: Computed Analytics
   # =============================================
@@ -138,6 +147,8 @@ modules:
         mode: deltas
       - store: store_payer_count
         mode: get
+      - store: store_first_seen
+        mode: get
     output:
       type: proto:x402.v1.PayerStats
 
@@ -151,6 +162,8 @@ modules:
       - store: store_recipient_volume
         mode: deltas
       - store: store_recipient_count
+        mode: get
+      - store: store_first_seen
         mode: get
     output:
       type: proto:x402.v1.RecipientStats
@@ -167,6 +180,8 @@ modules:
       - store: store_facilitator_count
         mode: get
       - store: store_facilitator_gas
+        mode: get
+      - store: store_first_seen
         mode: get
     output:
       type: proto:x402.v1.FacilitatorStats

@@ -7,7 +7,7 @@
 //!    (https://docs.cdp.coinbase.com/x402), facilitators settle payments this way.
 //!
 //! 2. **Permit2 proxy (secondary)**: `Settled()` and `SettledWithPermit()` events from the
-//!    x402ExactPermit2Proxy contract (parameterless events, currently testnet only).
+//!    x402ExactPermit2Proxy contract (parameterless events).
 //!
 //! Also decodes ERC-20 `Transfer` events to extract payment amounts.
 

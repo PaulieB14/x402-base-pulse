@@ -41,6 +41,7 @@ The [x402 protocol](https://docs.cdp.coinbase.com/x402/core-concepts/how-it-work
 | `store_facilitator_volume` | Store | Accumulates total USDC volume per facilitator |
 | `store_facilitator_count` | Store | Counts settlements per facilitator |
 | `store_facilitator_gas` | Store | Tracks gas costs per facilitator |
+| `store_first_seen` | Store | Records first-seen timestamp per payer, recipient, and facilitator |
 | `map_payer_stats` | Map | Computes payer leaderboards and averages |
 | `map_recipient_stats` | Map | Computes resource server revenue stats |
 | `map_facilitator_stats` | Map | Computes facilitator economics (volume vs gas cost) |
@@ -51,6 +52,8 @@ The [x402 protocol](https://docs.cdp.coinbase.com/x402/core-concepts/how-it-work
 | Contract | Address | Events |
 |----------|---------|--------|
 | USDC (Base) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `AuthorizationUsed`, `Transfer` |
+| x402ExactPermit2Proxy | `0x4020615294c913F045dc10f0a5cdEbd86c280001` | `Settled`, `SettledWithPermit` |
+| x402UptoPermit2Proxy | `0x4020633461b2895a48930Ff97eE8fCdE8E520002` | `Settled`, `SettledWithPermit` |
 
 ## Quick Start
 
@@ -80,11 +83,10 @@ substreams-sink-sql run "psql://localhost/x402" \
 | `payers` | `payer_address` | Aggregated spend and payment count per payer |
 | `recipients` | `recipient_address` | Revenue and payment count per resource server |
 | `facilitators` | `facilitator_address` | Volume settled, settlement count, total gas spent |
-| `daily_stats` | `date` | Daily protocol-wide volume, participants, gas |
-
 ### Views
 | View | Description |
 |------|-------------|
+| `daily_stats` | Daily protocol-wide volume, unique participants, gas |
 | `top_payers` | Ranked by total USDC spent |
 | `top_recipients` | Ranked by total USDC received |
 | `facilitator_economics` | Volume settled vs gas cost per facilitator |

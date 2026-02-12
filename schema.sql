@@ -110,25 +110,21 @@ CREATE INDEX IF NOT EXISTS idx_facilitators_settlements ON facilitators(total_se
 CREATE INDEX IF NOT EXISTS idx_facilitators_gas ON facilitators(total_gas_spent DESC);
 
 -------------------------------------------------
--- DAILY_STATS: Daily protocol-wide aggregates
+-- DAILY_STATS: Computed from settlements table
 -------------------------------------------------
-CREATE TABLE IF NOT EXISTS daily_stats (
-    date DATE PRIMARY KEY,
-
-    -- Volume
-    total_volume NUMERIC(38, 6) NOT NULL DEFAULT 0,
-    total_settlements INTEGER NOT NULL DEFAULT 0,
-
-    -- Participants
-    unique_payers INTEGER NOT NULL DEFAULT 0,
-    unique_recipients INTEGER NOT NULL DEFAULT 0,
-    unique_facilitators INTEGER NOT NULL DEFAULT 0,
-
-    -- Gas economics
-    total_gas_spent NUMERIC(38, 0) NOT NULL DEFAULT 0,
-
-    updated_at TIMESTAMP DEFAULT NOW()
-);
+DROP TABLE IF EXISTS daily_stats;
+CREATE OR REPLACE VIEW daily_stats AS
+SELECT
+    block_timestamp::date AS date,
+    SUM(amount) AS total_volume,
+    COUNT(*) AS total_settlements,
+    COUNT(DISTINCT payer) AS unique_payers,
+    COUNT(DISTINCT recipient) AS unique_recipients,
+    COUNT(DISTINCT facilitator) AS unique_facilitators,
+    SUM(gas_used * gas_price) AS total_gas_spent
+FROM settlements
+GROUP BY block_timestamp::date
+ORDER BY date DESC;
 
 -------------------------------------------------
 -- VIEWS: Protocol analytics dashboards
