@@ -54,9 +54,39 @@ pub const SETTLED_WITH_PERMIT_TOPIC: [u8; 32] = [
     0xae, 0x04, 0xe5, 0x07, 0xb0, 0x9e, 0xf5, 0xd8,
 ];
 
+/// FacilitatorAdded(address indexed facilitator, string name, string url, uint256 timestamp)
+/// keccak256("FacilitatorAdded(address,string,string,uint256)")
+pub const FACILITATOR_ADDED_TOPIC: [u8; 32] = [
+    0x7b, 0x7d, 0x3d, 0x0b, 0xd7, 0x1d, 0x47, 0x7d,
+    0x21, 0xa6, 0x79, 0xb1, 0x1b, 0x01, 0x64, 0xf3,
+    0xe0, 0x09, 0x4f, 0x95, 0x6a, 0x1c, 0x9a, 0x5b,
+    0x21, 0xf2, 0xd0, 0xaa, 0x13, 0x0a, 0xe8, 0xb1,
+];
+
+/// FacilitatorRemoved(address indexed facilitator, uint256 timestamp)
+/// keccak256("FacilitatorRemoved(address,uint256)")
+pub const FACILITATOR_REMOVED_TOPIC: [u8; 32] = [
+    0x23, 0xb7, 0xa9, 0x4a, 0x73, 0x43, 0x1b, 0x33,
+    0x94, 0xd4, 0x99, 0x58, 0x9a, 0xc4, 0x24, 0xc3,
+    0x5e, 0xdc, 0x5a, 0x5b, 0x5e, 0xb9, 0xc1, 0x61,
+    0xab, 0x91, 0x48, 0xc7, 0x69, 0x9c, 0x0a, 0x17,
+];
+
 // =============================================
 // Decoded event structs
 // =============================================
+
+/// Decoded FacilitatorAdded event
+pub struct FacilitatorAddedEvent {
+    pub facilitator: Vec<u8>,
+    pub name: String,
+    pub url: String,
+}
+
+/// Decoded FacilitatorRemoved event
+pub struct FacilitatorRemovedEvent {
+    pub facilitator: Vec<u8>,
+}
 
 /// Decoded ERC-20 Transfer event
 pub struct TransferEvent {
@@ -130,6 +160,74 @@ pub fn is_settled_event(log: &Log) -> bool {
 /// Check if a log is a SettledWithPermit() event from the x402 proxy
 pub fn is_settled_with_permit_event(log: &Log) -> bool {
     !log.topics.is_empty() && log.topics[0] == SETTLED_WITH_PERMIT_TOPIC
+}
+
+/// Decode FacilitatorAdded event
+/// Event: FacilitatorAdded(address indexed facilitator, string name, string url, uint256 timestamp)
+pub fn decode_facilitator_added(log: &Log) -> Option<FacilitatorAddedEvent> {
+    if log.topics.len() < 2 || log.data.len() < 128 {
+        return None;
+    }
+    if log.topics[0] != FACILITATOR_ADDED_TOPIC {
+        return None;
+    }
+
+    let facilitator = log.topics[1][12..32].to_vec();
+
+    // ABI-decode dynamic data: name (string) and url (string)
+    let name = decode_abi_string(&log.data, 0).unwrap_or_default();
+    let url = decode_abi_string(&log.data, 1).unwrap_or_default();
+
+    Some(FacilitatorAddedEvent { facilitator, name, url })
+}
+
+/// Decode FacilitatorRemoved event
+/// Event: FacilitatorRemoved(address indexed facilitator, uint256 timestamp)
+pub fn decode_facilitator_removed(log: &Log) -> Option<FacilitatorRemovedEvent> {
+    if log.topics.len() < 2 {
+        return None;
+    }
+    if log.topics[0] != FACILITATOR_REMOVED_TOPIC {
+        return None;
+    }
+
+    let facilitator = log.topics[1][12..32].to_vec();
+    Some(FacilitatorRemovedEvent { facilitator })
+}
+
+/// Decode an ABI-encoded string from event data at a given parameter index.
+/// ABI encoding: offset at param_index*32, then length at offset, then string bytes.
+fn decode_abi_string(data: &[u8], param_index: usize) -> Option<String> {
+    let offset_start = param_index * 32;
+    if data.len() < offset_start + 32 {
+        return None;
+    }
+    // Read the offset (last 4 bytes of the 32-byte word, since offsets are small)
+    let offset = parse_uint256_as_usize(&data[offset_start..offset_start + 32])?;
+    if data.len() < offset + 64 {
+        return None;
+    }
+    // Read the string length
+    let str_len = parse_uint256_as_usize(&data[offset..offset + 32])?;
+    let str_start = offset + 32;
+    if data.len() < str_start + str_len {
+        return None;
+    }
+    String::from_utf8(data[str_start..str_start + str_len].to_vec()).ok()
+}
+
+/// Parse a uint256 as usize (only works for small values)
+fn parse_uint256_as_usize(data: &[u8]) -> Option<usize> {
+    if data.len() != 32 {
+        return None;
+    }
+    // Check that the high bytes are zero (value fits in usize)
+    if data[..24].iter().any(|&b| b != 0) {
+        return None;
+    }
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&data[24..32]);
+    Some(u64::from_be_bytes(bytes) as usize)
 }
 
 /// Parse uint256 from 32-byte big-endian slice

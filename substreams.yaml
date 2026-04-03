@@ -32,6 +32,34 @@ params:
 
 modules:
   # =============================================
+  # LAYER 0: Facilitator Registry
+  # =============================================
+
+  - name: map_facilitator_registry_events
+    kind: map
+    doc: |
+      Extracts FacilitatorAdded and FacilitatorRemoved events from the
+      on-chain FacilitatorRegistry contract. These events define which
+      addresses are authorized x402 facilitators.
+    initialBlock: 30011612
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:x402.v1.FacilitatorRegistryEvents
+
+  - name: store_facilitator_registry
+    kind: store
+    doc: |
+      Maintains the set of registered facilitators with their names.
+      Key: facilitator address (lowercase). Value: "name|url" or empty if removed.
+      Uses set policy — FacilitatorRemoved overwrites with empty string.
+    initialBlock: 30011612
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_facilitator_registry_events
+
+  # =============================================
   # LAYER 1: Event Extraction
   # =============================================
 
@@ -39,12 +67,10 @@ modules:
     kind: map
     doc: |
       Extracts x402 payment settlements on Base by detecting EIP-3009
-      AuthorizationUsed events on the USDC contract. Per the x402 protocol
-      (https://docs.cdp.coinbase.com/x402), facilitators settle payments
-      by calling transferWithAuthorization on USDC. Each AuthorizationUsed
-      event is paired with its Transfer event to capture payer, recipient,
-      and amount. Also detects Permit2 proxy settlements (Settled /
-      SettledWithPermit) for the newer settlement path.
+      AuthorizationUsed events on the USDC contract. Filters EIP-3009
+      settlements to only include transactions where tx.from is a
+      registered facilitator in the on-chain FacilitatorRegistry.
+      Permit2 proxy settlements are self-identifying and not gated.
     initialBlock: 25000000
     blockFilter:
       module: ethcommon:index_events
@@ -52,6 +78,8 @@ modules:
         string: "evt_addr:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
     inputs:
       - source: sf.ethereum.type.v2.Block
+      - store: store_facilitator_registry
+        mode: get
     output:
       type: proto:x402.v1.Settlements
 
@@ -172,6 +200,7 @@ modules:
     kind: map
     doc: |
       Computes facilitator economics: volume processed, gas spent, settlement count.
+      Enriches with name and active status from the FacilitatorRegistry.
     initialBlock: 25000000
     inputs:
       - map: map_x402_settlements
@@ -182,6 +211,8 @@ modules:
       - store: store_facilitator_gas
         mode: get
       - store: store_first_seen
+        mode: get
+      - store: store_facilitator_registry
         mode: get
     output:
       type: proto:x402.v1.FacilitatorStats

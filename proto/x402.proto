@@ -94,4 +94,24 @@ message FacilitatorStat {
     string total_gas_spent = 4;           // Total gas cost in wei
     google.protobuf.Timestamp first_settlement_at = 5;
     google.protobuf.Timestamp last_settlement_at = 6;
+    string name = 7;                      // From FacilitatorRegistry FacilitatorAdded event
+    bool is_active = 8;                   // False if FacilitatorRemoved was emitted
+    string url = 9;                       // Facilitator endpoint URL
+}
+
+// =============================================
+// Facilitator Registry
+// =============================================
+
+// FacilitatorRegistry events detected in a block
+message FacilitatorRegistryEvents {
+    repeated FacilitatorRegistryEvent events = 1;
+    uint64 block_number = 2;
+}
+
+message FacilitatorRegistryEvent {
+    string facilitator_address = 1;
+    string name = 2;
+    string url = 3;
+    bool is_added = 4;                    // true = added, false = removed
 }

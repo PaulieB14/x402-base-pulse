@@ -21,9 +21,9 @@ pub struct Settlements {
 /// (<https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works>):
 ///
 /// 1. EIP-3009: AuthorizationUsed events on USDC from facilitator
-///    calling transferWithAuthorization. The nonce field is populated.
+///     calling transferWithAuthorization. The nonce field is populated.
 /// 2. Permit2 proxy: Settled/SettledWithPermit events from the
-///    x402ExactPermit2Proxy contract (when deployed on mainnet).
+///     x402ExactPermit2Proxy contract (when deployed on mainnet).
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Settlement {
@@ -69,6 +69,7 @@ pub struct Settlement {
     #[prost(string, tag="13")]
     pub gas_price: ::prost::alloc::string::String,
     /// EIP-3009 authorization nonce (from AuthorizationUsed event)
+    ///
     /// bytes32 nonce, hex-encoded
     #[prost(string, tag="14")]
     pub nonce: ::prost::alloc::string::String,
@@ -151,5 +152,40 @@ pub struct FacilitatorStat {
     pub first_settlement_at: ::core::option::Option<::prost_types::Timestamp>,
     #[prost(message, optional, tag="6")]
     pub last_settlement_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// From FacilitatorRegistry FacilitatorAdded event
+    #[prost(string, tag="7")]
+    pub name: ::prost::alloc::string::String,
+    /// False if FacilitatorRemoved was emitted
+    #[prost(bool, tag="8")]
+    pub is_active: bool,
+    /// Facilitator endpoint URL
+    #[prost(string, tag="9")]
+    pub url: ::prost::alloc::string::String,
+}
+// =============================================
+// Facilitator Registry
+// =============================================
+
+/// FacilitatorRegistry events detected in a block
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FacilitatorRegistryEvents {
+    #[prost(message, repeated, tag="1")]
+    pub events: ::prost::alloc::vec::Vec<FacilitatorRegistryEvent>,
+    #[prost(uint64, tag="2")]
+    pub block_number: u64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FacilitatorRegistryEvent {
+    #[prost(string, tag="1")]
+    pub facilitator_address: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub url: ::prost::alloc::string::String,
+    /// true = added, false = removed
+    #[prost(bool, tag="4")]
+    pub is_added: bool,
 }
 // @@protoc_insertion_point(module)

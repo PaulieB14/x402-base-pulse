@@ -92,6 +92,11 @@ CREATE INDEX IF NOT EXISTS idx_recipients_count ON recipients(total_payments DES
 CREATE TABLE IF NOT EXISTS facilitators (
     facilitator_address VARCHAR(42) PRIMARY KEY,
 
+    -- Identity (from FacilitatorRegistry)
+    name VARCHAR(128) NOT NULL DEFAULT '',
+    url VARCHAR(256) NOT NULL DEFAULT '',
+    is_active BOOLEAN NOT NULL DEFAULT true,
+
     -- Settlement metrics
     total_settlements INTEGER NOT NULL DEFAULT 0,
     total_volume_settled NUMERIC(38, 6) NOT NULL DEFAULT 0,
@@ -166,6 +171,8 @@ LIMIT 100;
 CREATE OR REPLACE VIEW facilitator_economics AS
 SELECT
     facilitator_address,
+    name,
+    is_active,
     total_settlements,
     total_volume_settled,
     total_gas_spent,

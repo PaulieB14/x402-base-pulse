@@ -23,14 +23,15 @@ mod abi;
 mod pb;
 
 use abi::{
-    decode_authorization_used, decode_erc20_transfer, format_address,
-    is_settled_event, is_settled_with_permit_event,
+    decode_authorization_used, decode_erc20_transfer, decode_facilitator_added,
+    decode_facilitator_removed, format_address, is_settled_event,
+    is_settled_with_permit_event,
 };
 use hex_literal::hex;
 use pb::x402::v1 as x402;
 use substreams::prelude::*;
 use substreams::scalar::BigInt;
-use substreams::store::{StoreAddBigInt, StoreAddInt64, StoreGet, StoreSetIfNotExistsInt64};
+use substreams::store::{StoreAddBigInt, StoreAddInt64, StoreGet, StoreSet, StoreSetIfNotExistsInt64};
 use substreams::Hex;
 use substreams_database_change::pb::database::DatabaseChanges;
 use substreams_database_change::tables::Tables;
@@ -49,6 +50,9 @@ const X402_PROXY: [u8; 20] = hex!("4020615294c913F045dc10f0a5cdEbd86c280001");
 
 /// x402UptoPermit2Proxy - secondary proxy for "upto" payment scheme
 const X402_UPTO_PROXY: [u8; 20] = hex!("4020633461b2895a48930Ff97eE8fCdE8E520002");
+
+/// FacilitatorRegistry on Base - tracks authorized x402 facilitator addresses
+const FACILITATOR_REGISTRY: [u8; 20] = hex!("67C75c4FD5BbbF5f6286A1874fe2d7dF0024Ebe8");
 
 // Null / zero address
 const ZERO_ADDR: &str = "0x0000000000000000000000000000000000000000";
@@ -110,11 +114,71 @@ fn proto_bigint_to_string(bi: &eth::BigInt) -> String {
 }
 
 // =============================================
+// LAYER 0: Facilitator Registry
+// =============================================
+
+/// Extract FacilitatorAdded and FacilitatorRemoved events from the on-chain
+/// FacilitatorRegistry contract.
+#[substreams::handlers::map]
+fn map_facilitator_registry_events(
+    blk: eth::Block,
+) -> Result<x402::FacilitatorRegistryEvents, substreams::errors::Error> {
+    let mut events = x402::FacilitatorRegistryEvents {
+        block_number: blk.number,
+        ..Default::default()
+    };
+
+    for log in blk.logs() {
+        let log_entry = log.log;
+        if log_entry.address != FACILITATOR_REGISTRY {
+            continue;
+        }
+
+        if let Some(added) = decode_facilitator_added(log_entry) {
+            events.events.push(x402::FacilitatorRegistryEvent {
+                facilitator_address: format_address(&added.facilitator),
+                name: added.name,
+                url: added.url,
+                is_added: true,
+            });
+        } else if let Some(removed) = decode_facilitator_removed(log_entry) {
+            events.events.push(x402::FacilitatorRegistryEvent {
+                facilitator_address: format_address(&removed.facilitator),
+                name: String::new(),
+                url: String::new(),
+                is_added: false,
+            });
+        }
+    }
+
+    Ok(events)
+}
+
+/// Maintain the set of registered facilitators. Key: address, Value: "name|url" or "" if removed.
+#[substreams::handlers::store]
+fn store_facilitator_registry(
+    events: x402::FacilitatorRegistryEvents,
+    store: StoreSetString,
+) {
+    for event in events.events {
+        let key = event.facilitator_address.to_lowercase();
+        if event.is_added {
+            let val = format!("{}|{}", event.name, event.url);
+            store.set(0, &key, &val);
+        } else {
+            // Mark as removed with empty string
+            let empty = String::new();
+            store.set(0, &key, &empty);
+        }
+    }
+}
+
+// =============================================
 // LAYER 1: Event Extraction
 // =============================================
 
 /// Extract x402 settlements by detecting EIP-3009 AuthorizationUsed events
-/// on the USDC contract.
+/// on the USDC contract. EIP-3009 settlements are gated by the FacilitatorRegistry.
 ///
 /// Per the x402 protocol (https://docs.cdp.coinbase.com/x402/core-concepts/how-it-works),
 /// facilitators settle payments by calling `transferWithAuthorization` on USDC.
@@ -125,7 +189,10 @@ fn proto_bigint_to_string(bi: &eth::BigInt) -> String {
 /// Also detects Permit2 proxy settlements (Settled / SettledWithPermit) from
 /// the x402ExactPermit2Proxy contract for the newer settlement path.
 #[substreams::handlers::map]
-fn map_x402_settlements(blk: eth::Block) -> Result<x402::Settlements, substreams::errors::Error> {
+fn map_x402_settlements(
+    blk: eth::Block,
+    registry_store: StoreGetString,
+) -> Result<x402::Settlements, substreams::errors::Error> {
     let mut settlements = x402::Settlements {
         block_number: blk.number,
         block_timestamp: Some(blk.timestamp().clone()),
@@ -151,6 +218,12 @@ fn map_x402_settlements(blk: eth::Block) -> Result<x402::Settlements, substreams
             .collect();
 
         if !auth_events.is_empty() {
+            // Gate: only process EIP-3009 if tx.from is a registered facilitator
+            let facilitator_addr = format_address(&trx.from).to_lowercase();
+            if registry_store.get_last(&facilitator_addr).is_none() {
+                continue; // Not a registered facilitator, skip
+            }
+
             // Collect Transfer events from USDC in this transaction
             let transfer_events: Vec<_> = receipt
                 .logs
@@ -475,7 +548,8 @@ fn map_recipient_stats(
     Ok(stats)
 }
 
-/// Compute facilitator economics
+/// Compute facilitator economics, enriched with name and active status from
+/// the FacilitatorRegistry.
 #[substreams::handlers::map]
 fn map_facilitator_stats(
     settlements: x402::Settlements,
@@ -483,6 +557,7 @@ fn map_facilitator_stats(
     count_store: StoreGetInt64,
     gas_store: StoreGetBigInt,
     first_seen_store: StoreGetInt64,
+    registry_store: StoreGetString,
 ) -> Result<x402::FacilitatorStats, substreams::errors::Error> {
     let mut stats = x402::FacilitatorStats {
         block_number: settlements.block_number,
@@ -500,6 +575,18 @@ fn map_facilitator_stats(
             .get_last(&format!("facilitator:{}", facilitator))
             .map(|secs| prost_types::Timestamp { seconds: secs, nanos: 0 });
 
+        // Look up facilitator name and status from registry
+        let (name, url, is_active) = match registry_store.get_last(&facilitator) {
+            Some(val) if !val.is_empty() => {
+                let parts: Vec<&str> = val.splitn(2, '|').collect();
+                let name = parts.first().unwrap_or(&"").to_string();
+                let url = parts.get(1).unwrap_or(&"").to_string();
+                (name, url, true)
+            }
+            Some(_) => (String::new(), String::new(), false), // Removed facilitator
+            None => (String::new(), String::new(), false),     // Unknown facilitator
+        };
+
         stats.stats.push(x402::FacilitatorStat {
             facilitator_address: facilitator,
             total_settlements,
@@ -507,6 +594,9 @@ fn map_facilitator_stats(
             total_gas_spent: total_gas,
             first_settlement_at,
             last_settlement_at: settlements.block_timestamp.clone(),
+            name,
+            is_active,
+            url,
         });
     }
 
@@ -608,6 +698,9 @@ fn db_out(
             .unwrap_or_else(|| "1970-01-01 00:00:00".to_string());
         tables
             .create_row("facilitators", &stat.facilitator_address)
+            .set("name", &stat.name)
+            .set("url", &stat.url)
+            .set("is_active", stat.is_active)
             .set("total_settlements", stat.total_settlements as i64)
             .set("total_volume_settled", stat.total_volume_settled.as_str())
             .set("total_gas_spent", stat.total_gas_spent.as_str())
