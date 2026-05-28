@@ -4,7 +4,9 @@
 
 Track every x402 payment settlement on Base. This Substreams detects when facilitators call `transferWithAuthorization` on USDC to settle [HTTP 402](https://docs.cdp.coinbase.com/x402) payments, extracting payer, recipient, amount, and facilitator data from each settlement.
 
-**v3.0.0** — Now gates EIP-3009 settlements through the on-chain [FacilitatorRegistry](https://basescan.org/address/0x67C75c4FD5BbbF5f6286A1874fe2d7dF0024Ebe8), matching the [x402-subgraph](https://github.com/PaulieB14/x402-subgraph). Facilitator names, URLs, and active status are resolved from registry events.
+**v3.1.0** — Adds a static facilitator allowlist (112 addresses across 29 operators) sourced from [Merit Systems' x402scan `facilitators` package](https://github.com/Merit-Systems/x402scan/tree/main/packages/external/facilitators). The gate now accepts a settlement if `tx.from` is **either** on-chain-registered via `FacilitatorRegistry` **or** present in the published allowlist. In practice the on-chain registry is sparsely populated (only Meridian as of 2026-05), so without the allowlist virtually no real x402 activity would be indexed. Matches gating used by x402scan + [x402-omnigraph subgraph](https://github.com/PaulieB14/x402-omnigraph).
+
+**v3.0.0** — Gated EIP-3009 settlements through the on-chain [FacilitatorRegistry](https://basescan.org/address/0x67C75c4FD5BbbF5f6286A1874fe2d7dF0024Ebe8) only. Facilitator names, URLs, and active status resolved from registry events. *Deprecated: produces empty output in practice — use v3.1.0.*
 
 ---
 
@@ -17,7 +19,7 @@ The [x402 protocol](https://docs.cdp.coinbase.com/x402/core-concepts/how-it-work
 3. Facilitator calls `transferWithAuthorization` on USDC to settle payment on-chain
 4. USDC emits `AuthorizationUsed` + `Transfer` events
 5. **This Substreams captures those events** and extracts settlement data
-6. **FacilitatorRegistry** gates EIP-3009 settlements — only registered facilitators are indexed
+6. **Facilitator gate** — settlements are kept only if `tx.from` is either on-chain-registered via `FacilitatorRegistry` or on the published static allowlist (x402scan's `facilitators` npm package, baked into the WASM at build time)
 
 ## Modules
 
@@ -25,7 +27,7 @@ The [x402 protocol](https://docs.cdp.coinbase.com/x402/core-concepts/how-it-work
 |--------|------|-------------|
 | `map_facilitator_registry_events` | Map | Extracts `FacilitatorAdded` / `FacilitatorRemoved` events from the on-chain registry |
 | `store_facilitator_registry` | Store | Maintains the set of registered facilitators with names and URLs |
-| `map_x402_settlements` | Map | Pairs `AuthorizationUsed` + `Transfer` events, gated by facilitator registry |
+| `map_x402_settlements` | Map | Pairs `AuthorizationUsed` + `Transfer` events; gates by FacilitatorRegistry **OR** static allowlist |
 | `store_payer_volume` | Store | Accumulates total USDC spent per payer |
 | `store_payer_count` | Store | Counts payments per payer |
 | `store_recipient_volume` | Store | Accumulates total USDC received per resource server |
@@ -63,7 +65,7 @@ substreams gui x402-base-pulse map_x402_settlements \
 
 # Sink to PostgreSQL
 substreams-sink-sql run "psql://localhost/x402" \
-  x402-base-pulse-v3.0.0.spkg \
+  x402-base-pulse-v3.1.0.spkg \
   -e base-mainnet.streamingfast.io:443
 ```
 
