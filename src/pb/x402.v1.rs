@@ -84,6 +84,11 @@ pub struct Settlement {
     /// EIP-3009 validBefore (unix secs; 0 if n/a)
     #[prost(uint64, tag="17")]
     pub valid_before: u64,
+    /// batch-settlement channel id (added v3.3.0; empty for exact/upto)
+    ///
+    /// x402BatchSettlement channelId (bytes32 hex)
+    #[prost(string, tag="18")]
+    pub channel_id: ::prost::alloc::string::String,
 }
 // =============================================
 // LAYER 3: Analytics

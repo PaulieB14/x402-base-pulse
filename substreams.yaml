@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: x402-base-pulse
-  version: v3.2.0
+  version: v3.3.0
   description: "x402 Base Pulse - Real-time payment protocol analytics for Coinbase x402 on Base"
   url: "https://github.com/PaulieB14/x402-base-pulse"
   image: "./x402-icon.jpg"
@@ -75,7 +75,7 @@ modules:
     blockFilter:
       module: ethcommon:index_events
       query:
-        string: "evt_addr:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        string: "evt_addr:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913 || evt_addr:0x4020074e9df2ce1dee5a9c1b5c3f541d02a10003"
     inputs:
       - source: sf.ethereum.type.v2.Block
       - store: store_facilitator_registry

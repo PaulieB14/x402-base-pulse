@@ -23,9 +23,10 @@ mod abi;
 mod pb;
 
 use abi::{
-    decode_authorization_used, decode_batch_settled, decode_erc20_transfer,
-    decode_facilitator_added, decode_facilitator_removed, decode_transfer_with_auth,
-    format_address, is_settled_event, is_settled_with_permit_event,
+    decode_authorization_used, decode_batch_claim_config, decode_claimed,
+    decode_erc20_transfer, decode_facilitator_added, decode_facilitator_removed,
+    decode_transfer_with_auth, format_address, is_settled_event,
+    is_settled_with_permit_event,
 };
 use hex_literal::hex;
 use pb::x402::v1 as x402;
@@ -50,6 +51,12 @@ const USDC: [u8; 20] = hex!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 /// carry NO contract code; 0x402085c2…0001 is the live proxy (also used by Pinax's
 /// evm-x402). The old dead addresses meant Path 2 caught zero proxy settlements.
 const X402_PROXY: [u8; 20] = hex!("402085c248eea27d92e8b30b2c58ed07f9e20001");
+
+/// x402BatchSettlement — canonical CREATE2 vanity address (same across chains),
+/// deployed on Base. Emits Claimed(channelId, sender, claimAmount, newTotalClaimed)
+/// per voucher claim; the ChannelConfig (payer/receiver/token) is passed in the
+/// claim call (stateless contract). 416 tx on Base as of 2026-07-28.
+const X402_BATCH: [u8; 20] = hex!("4020074e9dF2ce1deE5A9C1b5c3f541D02a10003");
 
 /// FacilitatorRegistry on Base - tracks authorized x402 facilitator addresses
 const FACILITATOR_REGISTRY: [u8; 20] = hex!("67C75c4FD5BbbF5f6286A1874fe2d7dF0024Ebe8");
@@ -440,6 +447,7 @@ fn map_x402_settlements(
                     nonce,
                     valid_after,
                     valid_before,
+                    channel_id: String::new(),
                 });
             }
 
@@ -461,17 +469,18 @@ fn map_x402_settlements(
             })
             .collect();
 
-        // Path 3: batch-settlement channel sweeps — x402BatchSettlement emits
-        // Settled(receiver, token, sender, amount) on redemption. Gate by
-        // token == USDC. (Forward-looking: 0 Base volume as of 2026-07-28.)
-        let batch_events: Vec<_> = receipt
+        // Path 3: batch-settlement — x402BatchSettlement emits Claimed(channelId,
+        // sender, claimAmount, newTotalClaimed) per voucher claim: the actual
+        // per-request settled value in a payment channel. Gated by the batch
+        // contract address. payer/receiver recovered from the claim call config.
+        let claimed_events: Vec<_> = receipt
             .logs
             .iter()
-            .filter_map(|log| decode_batch_settled(log))
-            .filter(|b| b.token == USDC)
+            .filter(|log| log.address == X402_BATCH)
+            .filter_map(|log| decode_claimed(log))
             .collect();
 
-        if proxy_events.is_empty() && batch_events.is_empty() {
+        if proxy_events.is_empty() && claimed_events.is_empty() {
             continue;
         }
 
@@ -522,32 +531,46 @@ fn map_x402_settlements(
                 nonce: String::new(),
                 valid_after: 0,
                 valid_before: 0,
+                channel_id: String::new(),
             });
         }
 
-        // Path 3: emit batch-settlement channel sweeps. recipient + amount + token
-        // are exact; payer is the on-chain settler (approx) pending channel-level
-        // attribution (v3.3, once batch has live volume).
-        for b in &batch_events {
-            settlements.settlements.push(x402::Settlement {
-                id: format!("{}-{}", Hex(&trx.hash).to_string(), b.log_index),
-                tx_hash: Hex(&trx.hash).to_string(),
-                log_index: b.log_index,
-                block_number: blk.number,
-                timestamp: Some(blk.timestamp().clone()),
-                payer: format_address(&b.sender),
-                recipient: format_address(&b.receiver),
-                token: format_address(&b.token),
-                amount: b.amount.clone(),
-                settlement_type: "batch_settlement".to_string(),
-                scheme: "batch".to_string(),
-                facilitator: facilitator.clone(),
-                gas_used: gas_used.clone(),
-                gas_price: gas_price.clone(),
-                nonce: String::new(),
-                valid_after: 0,
-                valid_before: 0,
-            });
+        // Path 3: one settlement per Claimed voucher. amount = claimAmount (value
+        // settled this claim); payer/receiver recovered from the claim call's
+        // ChannelConfig for single-config calls. Multi-claim aggregates that can't
+        // be resolved keep channelId + amount with empty payer/receiver.
+        if !claimed_events.is_empty() {
+            let cfg = trx
+                .calls
+                .iter()
+                .filter(|c| c.address == X402_BATCH)
+                .find_map(|c| decode_batch_claim_config(&c.input, &USDC));
+            let (b_payer, b_recipient) = match &cfg {
+                Some((p, r)) => (format_address(p), format_address(r)),
+                None => (String::new(), String::new()),
+            };
+            for cl in &claimed_events {
+                settlements.settlements.push(x402::Settlement {
+                    id: format!("{}-{}", Hex(&trx.hash).to_string(), cl.log_index),
+                    tx_hash: Hex(&trx.hash).to_string(),
+                    log_index: cl.log_index,
+                    block_number: blk.number,
+                    timestamp: Some(blk.timestamp().clone()),
+                    payer: b_payer.clone(),
+                    recipient: b_recipient.clone(),
+                    token: format_address(&USDC),
+                    amount: cl.claim_amount.clone(),
+                    settlement_type: "batch_claim".to_string(),
+                    scheme: "batch".to_string(),
+                    facilitator: facilitator.clone(),
+                    gas_used: gas_used.clone(),
+                    gas_price: gas_price.clone(),
+                    nonce: String::new(),
+                    valid_after: 0,
+                    valid_before: 0,
+                    channel_id: Hex(&cl.channel_id).to_string(),
+                });
+            }
         }
     }
 
@@ -843,7 +866,8 @@ fn db_out(
             .set("gas_price", &s.gas_price)
             .set("nonce", &s.nonce)
             .set("valid_after", s.valid_after as i64)
-            .set("valid_before", s.valid_before as i64);
+            .set("valid_before", s.valid_before as i64)
+            .set("channel_id", &s.channel_id);
     }
 
     // Upsert payer stats

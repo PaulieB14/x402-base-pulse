@@ -71,6 +71,17 @@ pub const BATCH_SETTLED_TOPIC: [u8; 32] = [
 pub const TWA_SELECTOR_BYTES: [u8; 4] = [0xcf, 0x09, 0x29, 0x95];
 pub const TWA_SELECTOR_VRS: [u8; 4] = [0xe3, 0xee, 0x16, 0x0e];
 
+/// x402BatchSettlement Claimed(bytes32 indexed channelId, address indexed sender,
+/// uint128 claimAmount, uint128 newTotalClaimed) — the per-voucher claim (the
+/// actual settled value for a batch micropayment).
+/// keccak256("Claimed(bytes32,address,uint128,uint128)")
+pub const CLAIMED_TOPIC: [u8; 32] = [
+    0x36, 0xbd, 0x54, 0x6b, 0xb5, 0x73, 0xe8, 0x92,
+    0x1f, 0xdb, 0xfd, 0x93, 0x4b, 0xbe, 0xd6, 0x2d,
+    0x87, 0x27, 0x96, 0xb0, 0x17, 0x92, 0xcd, 0x24,
+    0x0c, 0xce, 0x27, 0xf7, 0x9d, 0xd3, 0xed, 0xdd,
+];
+
 /// FacilitatorAdded(address indexed facilitator, string name, string url, uint256 timestamp)
 /// keccak256("FacilitatorAdded(address,string,string,uint256)")
 pub const FACILITATOR_ADDED_TOPIC: [u8; 32] = [
@@ -234,6 +245,65 @@ fn u256_low_u64(data: &[u8]) -> u64 {
     let mut b = [0u8; 8];
     b.copy_from_slice(&data[24..32]);
     u64::from_be_bytes(b)
+}
+
+/// Decoded x402BatchSettlement Claimed event — one per voucher claim.
+pub struct ClaimedEvent {
+    pub channel_id: Vec<u8>,   // bytes32 (the EIP-712 hash of the ChannelConfig)
+    pub sender: Vec<u8>,       // msg.sender that submitted the claim (the claimer)
+    pub claim_amount: String,  // uint128 — value claimed in THIS event
+    pub log_index: u32,
+}
+
+/// Decode Claimed(bytes32 channelId, address sender, uint128 claimAmount, uint128 newTotalClaimed).
+pub fn decode_claimed(log: &Log) -> Option<ClaimedEvent> {
+    if log.topics.len() < 3 || log.data.len() < 32 {
+        return None;
+    }
+    if log.topics[0] != CLAIMED_TOPIC {
+        return None;
+    }
+    Some(ClaimedEvent {
+        channel_id: log.topics[1].clone(),
+        sender: log.topics[2][12..32].to_vec(),
+        claim_amount: parse_uint256(&log.data[0..32]),
+        log_index: log.index,
+    })
+}
+
+/// Recover (payer, receiver) for a batch claim from the claim call's embedded
+/// `ChannelConfig`. The contract is stateless — the config is passed in each call.
+/// Struct layout: payer(0), payerAuthorizer(1), receiver(2), receiverAuthorizer(3),
+/// token(4), … — so we locate the USDC `token` word and back out payer (token-4)
+/// and receiver (token-2). Returns None unless exactly one USDC config is present
+/// (multi-claim aggregate calls are left with channelId+amount only).
+pub fn decode_batch_claim_config(input: &[u8], usdc: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    if input.len() < 4 + 5 * 32 {
+        return None;
+    }
+    let body = &input[4..];
+    let nwords = body.len() / 32;
+    let word = |i: usize| &body[i * 32..(i + 1) * 32];
+    let mut hits = Vec::new();
+    for i in 0..nwords {
+        let w = word(i);
+        if w[0..12].iter().all(|&b| b == 0) && &w[12..32] == usdc {
+            hits.push(i);
+        }
+    }
+    if hits.len() != 1 {
+        return None;
+    }
+    let t = hits[0];
+    if t < 4 {
+        return None;
+    }
+    let payer = word(t - 4);
+    let receiver = word(t - 2);
+    if payer[0..12].iter().any(|&b| b != 0) || receiver[0..12].iter().any(|&b| b != 0) {
+        return None;
+    }
+    Some((payer[12..32].to_vec(), receiver[12..32].to_vec()))
 }
 
 /// Check if a log is a Settled() event from the x402 proxy

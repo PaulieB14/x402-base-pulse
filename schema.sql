@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS settlements (
     valid_after BIGINT NOT NULL DEFAULT 0,
     valid_before BIGINT NOT NULL DEFAULT 0,
 
+    -- x402BatchSettlement channel id (added v3.3.0; empty for exact/upto)
+    channel_id VARCHAR(66) NOT NULL DEFAULT '',
+
     created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -55,6 +58,7 @@ CREATE INDEX IF NOT EXISTS idx_settlements_facilitator ON settlements(facilitato
 CREATE INDEX IF NOT EXISTS idx_settlements_timestamp ON settlements(block_timestamp);
 CREATE INDEX IF NOT EXISTS idx_settlements_type ON settlements(settlement_type);
 CREATE INDEX IF NOT EXISTS idx_settlements_scheme ON settlements(scheme);
+CREATE INDEX IF NOT EXISTS idx_settlements_channel ON settlements(channel_id);
 CREATE INDEX IF NOT EXISTS idx_settlements_amount ON settlements(amount DESC);
 
 -------------------------------------------------

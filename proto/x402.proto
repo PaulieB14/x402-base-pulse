@@ -52,6 +52,9 @@ message Settlement {
     string scheme = 15;                   // "exact", "upto", or "batch"
     uint64 valid_after = 16;              // EIP-3009 validAfter (unix secs; 0 if n/a)
     uint64 valid_before = 17;             // EIP-3009 validBefore (unix secs; 0 if n/a)
+
+    // batch-settlement channel id (added v3.3.0; empty for exact/upto)
+    string channel_id = 18;               // x402BatchSettlement channelId (bytes32 hex)
 }
 
 // =============================================
