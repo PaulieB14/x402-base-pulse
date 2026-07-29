@@ -27,7 +27,11 @@ CREATE TABLE IF NOT EXISTS settlements (
     -- eip3009_proxy: EIP-3009 + proxy Settled event in same tx
     -- settled: proxy Settled() event
     -- settled_with_permit: proxy SettledWithPermit() event
+    -- batch_settlement: x402BatchSettlement channel redemption
     settlement_type VARCHAR(32) NOT NULL,
+
+    -- x402 payment scheme: "exact", "upto", or "batch" (added v3.2.0)
+    scheme VARCHAR(16) NOT NULL DEFAULT 'exact',
 
     -- Facilitator info
     facilitator VARCHAR(42) NOT NULL,         -- tx.from - who submitted and paid gas
@@ -36,6 +40,10 @@ CREATE TABLE IF NOT EXISTS settlements (
 
     -- EIP-3009 authorization nonce (hex-encoded bytes32)
     nonce VARCHAR(66),
+
+    -- EIP-3009 authorization validity window (unix seconds; 0 if n/a) (added v3.2.0)
+    valid_after BIGINT NOT NULL DEFAULT 0,
+    valid_before BIGINT NOT NULL DEFAULT 0,
 
     created_at TIMESTAMP DEFAULT NOW()
 );
@@ -46,6 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_settlements_recipient ON settlements(recipient);
 CREATE INDEX IF NOT EXISTS idx_settlements_facilitator ON settlements(facilitator);
 CREATE INDEX IF NOT EXISTS idx_settlements_timestamp ON settlements(block_timestamp);
 CREATE INDEX IF NOT EXISTS idx_settlements_type ON settlements(settlement_type);
+CREATE INDEX IF NOT EXISTS idx_settlements_scheme ON settlements(scheme);
 CREATE INDEX IF NOT EXISTS idx_settlements_amount ON settlements(amount DESC);
 
 -------------------------------------------------

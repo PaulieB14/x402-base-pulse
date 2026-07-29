@@ -73,6 +73,17 @@ pub struct Settlement {
     /// bytes32 nonce, hex-encoded
     #[prost(string, tag="14")]
     pub nonce: ::prost::alloc::string::String,
+    /// Scheme + EIP-3009 validity window (added v3.2.0)
+    ///
+    /// "exact", "upto", or "batch"
+    #[prost(string, tag="15")]
+    pub scheme: ::prost::alloc::string::String,
+    /// EIP-3009 validAfter (unix secs; 0 if n/a)
+    #[prost(uint64, tag="16")]
+    pub valid_after: u64,
+    /// EIP-3009 validBefore (unix secs; 0 if n/a)
+    #[prost(uint64, tag="17")]
+    pub valid_before: u64,
 }
 // =============================================
 // LAYER 3: Analytics

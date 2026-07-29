@@ -47,6 +47,11 @@ message Settlement {
 
     // EIP-3009 authorization nonce (from AuthorizationUsed event)
     string nonce = 14;                    // bytes32 nonce, hex-encoded
+
+    // Scheme + EIP-3009 validity window (added v3.2.0)
+    string scheme = 15;                   // "exact", "upto", or "batch"
+    uint64 valid_after = 16;              // EIP-3009 validAfter (unix secs; 0 if n/a)
+    uint64 valid_before = 17;             // EIP-3009 validBefore (unix secs; 0 if n/a)
 }
 
 // =============================================

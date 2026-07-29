@@ -54,6 +54,23 @@ pub const SETTLED_WITH_PERMIT_TOPIC: [u8; 32] = [
     0xae, 0x04, 0xe5, 0x07, 0xb0, 0x9e, 0xf5, 0xd8,
 ];
 
+/// x402BatchSettlement Settled(address indexed receiver, address indexed token,
+/// address indexed sender, uint128 amount) — batch-settlement channel redemption.
+/// keccak256("Settled(address,address,address,uint128)")
+pub const BATCH_SETTLED_TOPIC: [u8; 32] = [
+    0x73, 0x37, 0xb4, 0x38, 0x6b, 0x69, 0x0f, 0xdb,
+    0x8b, 0xa6, 0x69, 0x05, 0xb9, 0x2b, 0x9d, 0x45,
+    0xd3, 0x3b, 0xc6, 0x62, 0x6e, 0xe2, 0x62, 0x0c,
+    0x90, 0x5f, 0xb1, 0x50, 0xec, 0x0c, 0xc4, 0x7d,
+];
+
+/// transferWithAuthorization selectors on USDC (EIP-3009), used to recover the
+/// validity window from call input.
+/// cf092995 = transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)
+/// e3ee160e = transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)
+pub const TWA_SELECTOR_BYTES: [u8; 4] = [0xcf, 0x09, 0x29, 0x95];
+pub const TWA_SELECTOR_VRS: [u8; 4] = [0xe3, 0xee, 0x16, 0x0e];
+
 /// FacilitatorAdded(address indexed facilitator, string name, string url, uint256 timestamp)
 /// keccak256("FacilitatorAdded(address,string,string,uint256)")
 pub const FACILITATOR_ADDED_TOPIC: [u8; 32] = [
@@ -103,6 +120,26 @@ pub struct AuthorizationUsedEvent {
     pub log_index: u32,
 }
 
+/// Decoded x402BatchSettlement Settled event (batch-settlement channel sweep).
+/// NOTE: `sender` is the on-chain settler (facilitator/receiverAuthorizer), an
+/// approximation of the payer. Precise per-payer attribution requires tracking
+/// ChannelCreated/Claimed by channelId — a v3.3 enhancement once batch has live
+/// Base volume to validate against (0 activity as of 2026-07-28).
+pub struct BatchSettledEvent {
+    pub receiver: Vec<u8>,   // ChannelConfig.receiver — the resource server (recipient)
+    pub token: Vec<u8>,
+    pub sender: Vec<u8>,     // on-chain settler (approx. payer)
+    pub amount: String,      // swept amount (uint128)
+    pub log_index: u32,
+}
+
+/// EIP-3009 validity window recovered from a transferWithAuthorization call
+pub struct TransferWithAuthCall {
+    pub nonce: Vec<u8>,      // bytes32, keyed to the AuthorizationUsed event
+    pub valid_after: u64,
+    pub valid_before: u64,
+}
+
 // =============================================
 // Decoders
 // =============================================
@@ -150,6 +187,53 @@ pub fn decode_authorization_used(log: &Log) -> Option<AuthorizationUsedEvent> {
         nonce,
         log_index: log.index,
     })
+}
+
+/// Decode x402BatchSettlement Settled(receiver, token, sender, amount).
+/// All three address args are indexed (topics 1-3); amount (uint128) is in data.
+pub fn decode_batch_settled(log: &Log) -> Option<BatchSettledEvent> {
+    if log.topics.len() < 4 || log.data.len() < 32 {
+        return None;
+    }
+    if log.topics[0] != BATCH_SETTLED_TOPIC {
+        return None;
+    }
+    Some(BatchSettledEvent {
+        receiver: log.topics[1][12..32].to_vec(),
+        token: log.topics[2][12..32].to_vec(),
+        sender: log.topics[3][12..32].to_vec(),
+        amount: parse_uint256(&log.data[0..32]),
+        log_index: log.index,
+    })
+}
+
+/// Decode a transferWithAuthorization call to recover the EIP-3009 validity
+/// window (validAfter/validBefore) + nonce. Args 0-5 are shared by both the
+/// `bytes` and `vrs` selector variants: from, to, value, validAfter, validBefore, nonce.
+pub fn decode_transfer_with_auth(input: &[u8]) -> Option<TransferWithAuthCall> {
+    if input.len() < 4 + 6 * 32 {
+        return None;
+    }
+    let sel = &input[0..4];
+    if sel != TWA_SELECTOR_BYTES && sel != TWA_SELECTOR_VRS {
+        return None;
+    }
+    let word = |i: usize| &input[4 + i * 32..4 + (i + 1) * 32];
+    Some(TransferWithAuthCall {
+        valid_after: u256_low_u64(word(3)),
+        valid_before: u256_low_u64(word(4)),
+        nonce: word(5).to_vec(),
+    })
+}
+
+/// Low 64 bits of a 32-byte big-endian word (validAfter/validBefore fit in u64)
+fn u256_low_u64(data: &[u8]) -> u64 {
+    if data.len() != 32 {
+        return 0;
+    }
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&data[24..32]);
+    u64::from_be_bytes(b)
 }
 
 /// Check if a log is a Settled() event from the x402 proxy

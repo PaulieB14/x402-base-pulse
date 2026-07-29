@@ -23,9 +23,9 @@ mod abi;
 mod pb;
 
 use abi::{
-    decode_authorization_used, decode_erc20_transfer, decode_facilitator_added,
-    decode_facilitator_removed, format_address, is_settled_event,
-    is_settled_with_permit_event,
+    decode_authorization_used, decode_batch_settled, decode_erc20_transfer,
+    decode_facilitator_added, decode_facilitator_removed, decode_transfer_with_auth,
+    format_address, is_settled_event, is_settled_with_permit_event,
 };
 use hex_literal::hex;
 use pb::x402::v1 as x402;
@@ -45,11 +45,11 @@ use substreams_ethereum::pb::eth::v2 as eth;
 /// USDC on Base mainnet - EIP-3009 compliant token
 const USDC: [u8; 20] = hex!("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
 
-/// x402ExactPermit2Proxy - deterministic across all EVM chains via CREATE2
-const X402_PROXY: [u8; 20] = hex!("4020615294c913F045dc10f0a5cdEbd86c280001");
-
-/// x402UptoPermit2Proxy - secondary proxy for "upto" payment scheme
-const X402_UPTO_PROXY: [u8; 20] = hex!("4020633461b2895a48930Ff97eE8fCdE8E520002");
+/// x402 Permit2 settlement proxy — the deployed CREATE2 address on Base.
+/// Verified on-chain 2026-07-28: the previous 0x4020615…/0x4020633… addresses
+/// carry NO contract code; 0x402085c2…0001 is the live proxy (also used by Pinax's
+/// evm-x402). The old dead addresses meant Path 2 caught zero proxy settlements.
+const X402_PROXY: [u8; 20] = hex!("402085c248eea27d92e8b30b2c58ed07f9e20001");
 
 /// FacilitatorRegistry on Base - tracks authorized x402 facilitator addresses
 const FACILITATOR_REGISTRY: [u8; 20] = hex!("67C75c4FD5BbbF5f6286A1874fe2d7dF0024Ebe8");
@@ -373,9 +373,22 @@ fn map_x402_settlements(
 
             // Check if this tx also has proxy events (hybrid detection)
             let has_proxy_settled = receipt.logs.iter().any(|log| {
-                (log.address == X402_PROXY || log.address == X402_UPTO_PROXY)
+                log.address == X402_PROXY
                     && (is_settled_event(log) || is_settled_with_permit_event(log))
             });
+
+            // Recover the EIP-3009 validity window (validAfter/validBefore) by
+            // decoding the transferWithAuthorization call(s) in this tx, keyed by
+            // nonce so each AuthorizationUsed event can look up its own window.
+            let mut validity: std::collections::HashMap<Vec<u8>, (u64, u64)> =
+                std::collections::HashMap::new();
+            for call in trx.calls.iter() {
+                if call.address == USDC {
+                    if let Some(twa) = decode_transfer_with_auth(&call.input) {
+                        validity.insert(twa.nonce, (twa.valid_after, twa.valid_before));
+                    }
+                }
+            }
 
             for auth in &auth_events {
                 // Find the corresponding Transfer event for this authorization.
@@ -406,6 +419,8 @@ fn map_x402_settlements(
                 };
 
                 let nonce = Hex(&auth.nonce).to_string();
+                let (valid_after, valid_before) =
+                    validity.get(&auth.nonce).copied().unwrap_or((0, 0));
 
                 settlements.settlements.push(x402::Settlement {
                     id: format!("{}-{}", Hex(&trx.hash).to_string(), auth.log_index),
@@ -418,10 +433,13 @@ fn map_x402_settlements(
                     token: format_address(&USDC),
                     amount,
                     settlement_type,
+                    scheme: "exact".to_string(),
                     facilitator: facilitator.clone(),
                     gas_used: gas_used.clone(),
                     gas_price: gas_price.clone(),
                     nonce,
+                    valid_after,
+                    valid_before,
                 });
             }
 
@@ -438,22 +456,24 @@ fn map_x402_settlements(
             .logs
             .iter()
             .filter(|log| {
-                (log.address == X402_PROXY || log.address == X402_UPTO_PROXY)
+                log.address == X402_PROXY
                     && (is_settled_event(log) || is_settled_with_permit_event(log))
             })
             .collect();
 
-        if proxy_events.is_empty() {
-            continue;
-        }
-
-        // Collect USDC transfers for correlation
-        let usdc_transfers: Vec<_> = receipt
+        // Path 3: batch-settlement channel sweeps — x402BatchSettlement emits
+        // Settled(receiver, token, sender, amount) on redemption. Gate by
+        // token == USDC. (Forward-looking: 0 Base volume as of 2026-07-28.)
+        let batch_events: Vec<_> = receipt
             .logs
             .iter()
-            .filter(|log| log.address == USDC)
-            .filter_map(|log| decode_erc20_transfer(log))
+            .filter_map(|log| decode_batch_settled(log))
+            .filter(|b| b.token == USDC)
             .collect();
+
+        if proxy_events.is_empty() && batch_events.is_empty() {
+            continue;
+        }
 
         let facilitator = format_address(&trx.from);
         let gas_used = trx.gas_used.to_string();
@@ -462,6 +482,14 @@ fn map_x402_settlements(
             .as_ref()
             .map(|p| proto_bigint_to_string(p))
             .unwrap_or_else(|| "0".to_string());
+
+        // Collect USDC transfers for proxy correlation
+        let usdc_transfers: Vec<_> = receipt
+            .logs
+            .iter()
+            .filter(|log| log.address == USDC)
+            .filter_map(|log| decode_erc20_transfer(log))
+            .collect();
 
         for (i, proxy_log) in proxy_events.iter().enumerate() {
             let settlement_type = if is_settled_with_permit_event(proxy_log) {
@@ -487,10 +515,38 @@ fn map_x402_settlements(
                 token: format_address(&USDC),
                 amount,
                 settlement_type,
+                scheme: "exact".to_string(),
                 facilitator: facilitator.clone(),
                 gas_used: gas_used.clone(),
                 gas_price: gas_price.clone(),
                 nonce: String::new(),
+                valid_after: 0,
+                valid_before: 0,
+            });
+        }
+
+        // Path 3: emit batch-settlement channel sweeps. recipient + amount + token
+        // are exact; payer is the on-chain settler (approx) pending channel-level
+        // attribution (v3.3, once batch has live volume).
+        for b in &batch_events {
+            settlements.settlements.push(x402::Settlement {
+                id: format!("{}-{}", Hex(&trx.hash).to_string(), b.log_index),
+                tx_hash: Hex(&trx.hash).to_string(),
+                log_index: b.log_index,
+                block_number: blk.number,
+                timestamp: Some(blk.timestamp().clone()),
+                payer: format_address(&b.sender),
+                recipient: format_address(&b.receiver),
+                token: format_address(&b.token),
+                amount: b.amount.clone(),
+                settlement_type: "batch_settlement".to_string(),
+                scheme: "batch".to_string(),
+                facilitator: facilitator.clone(),
+                gas_used: gas_used.clone(),
+                gas_price: gas_price.clone(),
+                nonce: String::new(),
+                valid_after: 0,
+                valid_before: 0,
             });
         }
     }
@@ -781,10 +837,13 @@ fn db_out(
             .set("token", &s.token)
             .set("amount", &s.amount)
             .set("settlement_type", &s.settlement_type)
+            .set("scheme", &s.scheme)
             .set("facilitator", &s.facilitator)
             .set("gas_used", &s.gas_used)
             .set("gas_price", &s.gas_price)
-            .set("nonce", &s.nonce);
+            .set("nonce", &s.nonce)
+            .set("valid_after", s.valid_after as i64)
+            .set("valid_before", s.valid_before as i64);
     }
 
     // Upsert payer stats
