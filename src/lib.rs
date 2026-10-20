@@ -34,7 +34,8 @@ use substreams::prelude::*;
 use substreams::scalar::BigInt;
 use substreams::store::{StoreAddBigInt, StoreAddInt64, StoreGet, StoreSet, StoreSetIfNotExistsInt64};
 use substreams::Hex;
-use substreams_database_change::pb::database::DatabaseChanges;
+use substreams_database_change::pb::sf::substreams::sink::database::v1::DatabaseChanges;
+use buffa_types::google::protobuf::Timestamp;
 use substreams_database_change::tables::Tables;
 use substreams_ethereum::pb::eth::v2 as eth;
 
@@ -327,12 +328,12 @@ fn map_x402_settlements(
 ) -> Result<x402::Settlements, substreams::errors::Error> {
     let mut settlements = x402::Settlements {
         block_number: blk.number,
-        block_timestamp: Some(blk.timestamp().clone()),
+        block_timestamp: blk.timestamp().clone().into(),
         ..Default::default()
     };
 
     for trx in blk.transaction_traces.iter() {
-        let receipt = match trx.receipt.as_ref() {
+        let receipt = match trx.receipt.as_option() {
             Some(r) => r,
             None => continue,
         };
@@ -374,7 +375,7 @@ fn map_x402_settlements(
             let gas_used = trx.gas_used.to_string();
             let gas_price = trx
                 .gas_price
-                .as_ref()
+                .as_option()
                 .map(|p| proto_bigint_to_string(p))
                 .unwrap_or_else(|| "0".to_string());
 
@@ -434,7 +435,7 @@ fn map_x402_settlements(
                     tx_hash: Hex(&trx.hash).to_string(),
                     log_index: auth.log_index,
                     block_number: blk.number,
-                    timestamp: Some(blk.timestamp().clone()),
+                    timestamp: blk.timestamp().clone().into(),
                     payer,
                     recipient,
                     token: format_address(&USDC),
@@ -488,7 +489,7 @@ fn map_x402_settlements(
         let gas_used = trx.gas_used.to_string();
         let gas_price = trx
             .gas_price
-            .as_ref()
+            .as_option()
             .map(|p| proto_bigint_to_string(p))
             .unwrap_or_else(|| "0".to_string());
 
@@ -518,7 +519,7 @@ fn map_x402_settlements(
                 tx_hash: Hex(&trx.hash).to_string(),
                 log_index: proxy_log.index,
                 block_number: blk.number,
-                timestamp: Some(blk.timestamp().clone()),
+                timestamp: blk.timestamp().clone().into(),
                 payer,
                 recipient,
                 token: format_address(&USDC),
@@ -555,7 +556,7 @@ fn map_x402_settlements(
                     tx_hash: Hex(&trx.hash).to_string(),
                     log_index: cl.log_index,
                     block_number: blk.number,
-                    timestamp: Some(blk.timestamp().clone()),
+                    timestamp: blk.timestamp().clone().into(),
                     payer: b_payer.clone(),
                     recipient: b_recipient.clone(),
                     token: format_address(&USDC),
@@ -670,7 +671,7 @@ fn store_facilitator_gas(settlements: x402::Settlements, store: StoreAddBigInt) 
 fn store_first_seen(settlements: x402::Settlements, store: StoreSetIfNotExistsInt64) {
     let ts = settlements
         .block_timestamp
-        .as_ref()
+        .as_option()
         .map(|t| t.seconds)
         .unwrap_or(0);
     for s in settlements.settlements {
@@ -712,13 +713,13 @@ fn map_payer_stats(
         let total_payments = count_store.get_last(&payer).unwrap_or(0) as u64;
         let first_payment_at = first_seen_store
             .get_last(&format!("payer:{}", payer))
-            .map(|secs| prost_types::Timestamp { seconds: secs, nanos: 0 });
+            .map(|secs| Timestamp { seconds: secs, nanos: 0, ..Default::default() });
 
         stats.stats.push(x402::PayerStat {
             payer_address: payer,
             total_spent: delta.new_value.to_string(),
             total_payments,
-            first_payment_at,
+            first_payment_at: first_payment_at.into(),
             last_payment_at: settlements.block_timestamp.clone(),
         });
     }
@@ -744,13 +745,13 @@ fn map_recipient_stats(
         let total_payments = count_store.get_last(&recipient).unwrap_or(0) as u64;
         let first_payment_at = first_seen_store
             .get_last(&format!("recipient:{}", recipient))
-            .map(|secs| prost_types::Timestamp { seconds: secs, nanos: 0 });
+            .map(|secs| Timestamp { seconds: secs, nanos: 0, ..Default::default() });
 
         stats.stats.push(x402::RecipientStat {
             recipient_address: recipient,
             total_received: delta.new_value.to_string(),
             total_payments,
-            first_payment_at,
+            first_payment_at: first_payment_at.into(),
             last_payment_at: settlements.block_timestamp.clone(),
         });
     }
@@ -783,7 +784,7 @@ fn map_facilitator_stats(
             .unwrap_or_else(|| "0".to_string());
         let first_settlement_at = first_seen_store
             .get_last(&format!("facilitator:{}", facilitator))
-            .map(|secs| prost_types::Timestamp { seconds: secs, nanos: 0 });
+            .map(|secs| Timestamp { seconds: secs, nanos: 0, ..Default::default() });
 
         // Look up facilitator name and status from registry
         let (name, url, is_active) = match registry_store.get_last(&facilitator) {
@@ -802,7 +803,7 @@ fn map_facilitator_stats(
             total_settlements,
             total_volume_settled: delta.new_value.to_string(),
             total_gas_spent: total_gas,
-            first_settlement_at,
+            first_settlement_at: first_settlement_at.into(),
             last_settlement_at: settlements.block_timestamp.clone(),
             name,
             is_active,
@@ -845,7 +846,7 @@ fn db_out(
 
         let timestamp = s
             .timestamp
-            .as_ref()
+            .as_option()
             .map(|t| unix_to_timestamp(t.seconds))
             .unwrap_or_else(|| "1970-01-01 00:00:00".to_string());
 
@@ -872,10 +873,10 @@ fn db_out(
 
     // Upsert payer stats
     for stat in payer_stats.stats {
-        let first_ts = stat.first_payment_at.as_ref()
+        let first_ts = stat.first_payment_at.as_option()
             .map(|t| unix_to_timestamp(t.seconds))
             .unwrap_or_else(|| "1970-01-01 00:00:00".to_string());
-        let last_ts = stat.last_payment_at.as_ref()
+        let last_ts = stat.last_payment_at.as_option()
             .map(|t| unix_to_timestamp(t.seconds))
             .unwrap_or_else(|| "1970-01-01 00:00:00".to_string());
         tables
@@ -888,10 +889,10 @@ fn db_out(
 
     // Upsert recipient stats
     for stat in recipient_stats.stats {
-        let first_ts = stat.first_payment_at.as_ref()
+        let first_ts = stat.first_payment_at.as_option()
             .map(|t| unix_to_timestamp(t.seconds))
             .unwrap_or_else(|| "1970-01-01 00:00:00".to_string());
-        let last_ts = stat.last_payment_at.as_ref()
+        let last_ts = stat.last_payment_at.as_option()
             .map(|t| unix_to_timestamp(t.seconds))
             .unwrap_or_else(|| "1970-01-01 00:00:00".to_string());
         tables
@@ -904,10 +905,10 @@ fn db_out(
 
     // Upsert facilitator stats
     for stat in facilitator_stats.stats {
-        let first_ts = stat.first_settlement_at.as_ref()
+        let first_ts = stat.first_settlement_at.as_option()
             .map(|t| unix_to_timestamp(t.seconds))
             .unwrap_or_else(|| "1970-01-01 00:00:00".to_string());
-        let last_ts = stat.last_settlement_at.as_ref()
+        let last_ts = stat.last_settlement_at.as_option()
             .map(|t| unix_to_timestamp(t.seconds))
             .unwrap_or_else(|| "1970-01-01 00:00:00".to_string());
         tables

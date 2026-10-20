@@ -1,6 +1,6 @@
 [package]
 name = "x402_base_pulse"
-version = "1.1.0"
+version = "3.4.0"
 edition = "2021"
 description = "x402 Base Pulse - Real-time x402 payment protocol analytics on Base"
 repository = "https://github.com/PaulieB14/x402-base-pulse"
@@ -11,15 +11,15 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # Substreams core
-substreams = "0.6"
-substreams-ethereum = "0.10"
+substreams = "0.8.0"
+substreams-ethereum = "0.12.0"
 
 # Database sink support
-substreams-database-change = "2.1"
+substreams-database-change = "5.0.0"
 
 # Protobuf
-prost = "0.13"
-prost-types = "0.13"
+buffa = "0.9.2"
+buffa-types = "0.9.2"
 
 # Utilities
 hex-literal = "0.3"
@@ -29,10 +29,6 @@ num-traits = "0.2"
 # WASM compatibility
 [target.wasm32-unknown-unknown.dependencies]
 getrandom = { version = "0.2", features = ["custom"] }
-
-[build-dependencies]
-substreams-ethereum = "0.10"
-anyhow = "1"
 
 [profile.release]
 lto = true
